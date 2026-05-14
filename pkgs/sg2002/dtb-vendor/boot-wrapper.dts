@@ -1,0 +1,10 @@
+/* SG2002 vendor DTS + bootargs for SD-root boot.
+ * `@vendorDts@` is substituted at build time with the path to the
+ * vendor `sg2002_licheervnano_sd.dts` under licheerv-nano-build. */
+#include "@vendorDts@"
+
+/ {
+	chosen {
+		bootargs = "console=ttyGS0,115200 console=ttyS0,115200 earlycon=sbi riscv.fwsz=0x80000 root=/dev/mmcblk0p2 rootwait";
+	};
+};

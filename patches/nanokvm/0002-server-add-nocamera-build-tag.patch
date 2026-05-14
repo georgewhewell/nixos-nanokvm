@@ -1,0 +1,99 @@
+From: George Watson <george@hellas.ai>
+Date: Tue, 12 May 2026 17:00:00 +0200
+Subject: [PATCH] server: add `nocamera` build tag to exclude libkvm.so
+
+`libkvm.so` (the vendor cgo dep behind `common/kvm_vision.go`)
+registers ~20 C++ static constructors in its `.init_array`. They run
+at process startup -- before main(), before any Go code, before our
+prior IsHdmiDisabled guard can even see the disk. One of them calls
+`SAMPLE_COMM_VI_ParseIni` -> `_try_release_sys`, which dereferences a
+NULL sensor descriptor on mainline kernels (no vendor sensor INI
+present) and SEGVs the whole server.
+
+Source-level guards can't help; we have to keep libkvm.so out of the
+link entirely. Add a `nocamera` build tag:
+
+  go build -tags nocamera ./...
+
+The cgo file `kvm_vision.go` gets `//go:build !nocamera`. A new
+`kvm_vision_stub.go` with `//go:build nocamera` provides no-op
+implementations of the same API (KvmVision, GetKvmVision, ReadMjpeg,
+ReadH264, SetHDMI, SetGop, SetFrameDetect, Close). Building with
+-tags nocamera selects the stub file, the cgo file is excluded, no
+-lkvm in LDFLAGS, no .so is dlopened, no constructors fire.
+
+The server boots cleanly; HDMI capture / video streaming endpoints
+return errors (-1) but HID, network, storage, OLED-config, auth, and
+the rest of the web UI work normally.
+
+Vendor-kernel builds (which actually have working camera capture)
+build without -tags nocamera and keep the original cgo path.
+---
+diff -urN a/server/common/kvm_vision.go b/server/common/kvm_vision.go
+--- a/server/common/kvm_vision.go
++++ b/server/common/kvm_vision.go
+@@ -1,3 +1,5 @@
++//go:build !nocamera
++
+ package common
+
+ /*
+diff -urN a/server/common/kvm_vision_stub.go b/server/common/kvm_vision_stub.go
+--- a/server/common/kvm_vision_stub.go
++++ b/server/common/kvm_vision_stub.go
+@@ -0,0 +1,55 @@
++//go:build nocamera
++
++// Stub for kvm_vision when built without the vendor camera SDK. The
++// real file (kvm_vision.go) links libkvm.so via cgo; that library's
++// .init_array registers ~20 C++ static constructors which call into
++// SAMPLE_COMM_VI_ParseIni and dereference a NULL sensor descriptor on
++// mainline kernels (no vendor sensor INI present). The constructors
++// run at process startup before any Go code, so we can't guard
++// around them — we have to keep libkvm.so out of the link entirely.
++//
++// Building with -tags nocamera selects this file and excludes the
++// real one, so the server starts with no HDMI capture / video
++// streaming but everything else (HID, network, storage, OLED-config,
++// auth, web UI) works.
++
++package common
++
++import (
++	"sync"
++
++	log "github.com/sirupsen/logrus"
++)
++
++var (
++	kvmVision     *KvmVision
++	kvmVisionOnce sync.Once
++)
++
++type KvmVision struct{}
++
++func GetKvmVision() *KvmVision {
++	kvmVisionOnce.Do(func() {
++		kvmVision = &KvmVision{}
++		log.Debugf("kvm vision: built with -tags nocamera; HDMI capture unavailable")
++	})
++	return kvmVision
++}
++
++func (k *KvmVision) ReadMjpeg(width uint16, height uint16, quality uint16) (data []byte, result int) {
++	return nil, -1
++}
++
++func (k *KvmVision) ReadH264(width uint16, height uint16, bitRate uint16) (data []byte, result int) {
++	return nil, -1
++}
++
++func (k *KvmVision) SetHDMI(enable bool) int {
++	return 0
++}
++
++func (k *KvmVision) SetGop(gop uint8) {}
++
++func (k *KvmVision) SetFrameDetect(frame uint8) {}
++
++func (k *KvmVision) Close() {}

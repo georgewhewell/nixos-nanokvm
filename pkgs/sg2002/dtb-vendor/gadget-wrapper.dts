@@ -1,0 +1,20 @@
+/* SG2002 vendor DTS patched for USB-gadget bring-up:
+ *   - dr_mode = "peripheral" forces the dwc2 controller into gadget mode
+ *     (OTG auto-detect is unreliable on this board and lands on host).
+ *   - FIFO sizes bumped to mainline values; vendor defaults silently
+ *     drop ECM packets > 128B (sophgo/linux #5).
+ *   - bootargs omits a root= since there is no SD-rooted fs in this
+ *     boot path (kernel expects an initrd). */
+#include "@vendorDts@"
+
+&usb {
+	dr_mode = "peripheral";
+	g-rx-fifo-size = <1536>;
+	g-tx-fifo-size = <128 128 64 64 64 64 32 32>;
+};
+
+/ {
+	chosen {
+		bootargs = "console=ttyS0,115200 earlycon=sbi riscv.fwsz=0x80000";
+	};
+};

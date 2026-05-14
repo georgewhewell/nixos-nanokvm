@@ -1,0 +1,40 @@
+From: George Wilkins <george@hellas.ai>
+Date: Sun, 26 Apr 2026 18:00:00 +0200
+Subject: thermal: cv1800: bridge thermal zone into hwmon
+
+Stacks on top of Haylen Chu's cv1800-thermal driver (our 0006)
+to register the thermal zone with the kernel's hwmon interface,
+so /sys/class/hwmon/hwmonN/temp1_input shows up alongside the
+canonical /sys/class/thermal/thermal_zone0/temp. Lets the same
+userspace tooling (lm-sensors, glances, prometheus-node-exporter,
+...) that already finds the iio-hwmon-bridged SAR-ADC voltages
+also pick up the SoC die temperature without bespoke parsing of
+/sys/class/thermal.
+
+Local addition to the LKML v5 series; if/when that lands in
+mainline this patch can be folded into the upstream driver
+(qcom/tsens.c and several other in-tree thermal drivers do the
+same call already).
+
+Signed-off-by: George Wilkins <george@hellas.ai>
+---
+--- a/drivers/thermal/cv1800_thermal.c
++++ b/drivers/thermal/cv1800_thermal.c
+@@ -14,6 +14,8 @@
+ #include <linux/thermal.h>
+ #include <linux/units.h>
+ 
++#include "thermal_hwmon.h"
++
+ #define TEMPSEN_VERSION					0x0
+ #define TEMPSEN_CTRL					0x4
+ #define  TEMPSEN_CTRL_EN				BIT(0)
+@@ -244,6 +246,8 @@
+ 	if (ret < 0)
+ 		return dev_err_probe(&pdev->dev, ret, "failed to request irq\n");
+ 
++	devm_thermal_add_hwmon_sysfs(&pdev->dev, tdev);
++
+ 	platform_set_drvdata(pdev, ctz);
+ 
+ 	return 0;

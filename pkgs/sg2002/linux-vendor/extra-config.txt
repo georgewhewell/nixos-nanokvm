@@ -1,0 +1,48 @@
+# Kernel options NixOS requires that the vendor 5.10 defconfig misses.
+# Appended onto the vendor defconfig before passing to linuxManualConfig.
+# Fragile as a text file but linuxManualConfig takes a pre-rendered
+# .config; no `make olddefconfig` runs, so these must be dep-consistent
+# with what the vendor defconfig already had.
+
+# Namespaces / cgroups — systemd won't come up without them.
+CONFIG_CGROUPS=y
+CONFIG_SYSFS=y
+CONFIG_PROC_FS=y
+CONFIG_FHANDLE=y
+
+# Crypto needed by NixOS activation (disk encryption, image signing).
+CONFIG_CRYPTO_USER_API_HASH=y
+CONFIG_CRYPTO_HMAC=y
+
+# Filesystem support.
+CONFIG_AUTOFS_FS=y
+CONFIG_TMPFS_POSIX_ACL=y
+CONFIG_TMPFS_XATTR=y
+CONFIG_OVERLAY_FS=y
+
+# Seccomp + sandboxing primitives systemd depends on.
+CONFIG_SECCOMP=y
+CONFIG_INOTIFY_USER=y
+CONFIG_BINFMT_ELF=y
+
+# /dev auto-creation.
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+
+# BPF + cgroup controllers — required by systemd-cgroupsv2 accounting.
+CONFIG_BPF_SYSCALL=y
+CONFIG_CGROUP_BPF=y
+CONFIG_MEMCG=y
+CONFIG_CPUSETS=y
+CONFIG_CGROUP_SCHED=y
+CONFIG_CGROUP_DEVICE=y
+CONFIG_CGROUP_FREEZER=y
+CONFIG_CGROUP_PIDS=y
+
+# Swap stack: zswap compressed front + ordinary swapfile backing.
+CONFIG_SWAP=y
+CONFIG_ZSWAP=y
+CONFIG_ZSWAP_DEFAULT_ON=y
+CONFIG_ZPOOL=y
+CONFIG_ZSMALLOC=y
+CONFIG_CRYPTO_ZSTD=y

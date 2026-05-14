@@ -1,0 +1,61 @@
+/* OLED variant overlay — concatenated AFTER sg2002-licheerv-nano-bw.dtsi.
+ *
+ * Trades the onboard AIC8800DC WiFi for an SSD1306-compatible I²C OLED on
+ * the 26-pin header. The SG2002 has a single SDIO1 controller and the
+ * AIC8800 sits directly on the SD1_* pads; those pads are also where
+ * IIC1 is reachable on the LicheeRV Nano header (vendor pinlist:
+ * SD1_D3__IIC1_SCL fn=2, SD1_D0__IIC1_SDA fn=2). So this is mutually
+ * exclusive with WiFi — pair only with builds that have
+ * sg2002.wifi.enable = false.
+ *
+ * Header pin → SoC pad (LicheeRV Nano spec v1.0 §2.3 + SG2002 dtbinding):
+ *   GPIOP[18] = SD1_D3 → IIC1_SCL
+ *   GPIOP[21] = SD1_D0 → IIC1_SDA
+ * Bank GPIOP is 3.3 V on the LicheeRV Nano per the pin-map legend, so
+ * an SSD1312 module powered from 3V3 sees clean logic levels with no
+ * level-shifter.
+ *
+ * SSD1312 isn't in mainline ssd1307fb's of_match table — its command set
+ * is a near-superset of SSD1306, so `solomon,ssd1306fb-i2c` with explicit
+ * width/height drives it correctly. Add `solomon,segment-no-remap` and/or
+ * `solomon,com-invdir` if the panel comes up mirrored or upside-down for
+ * the specific board's wiring.
+ */
+
+/* No /chosen override here: for both kexec paths and FIT boot we set
+ * fbcon=font:MINI4x6 + console=tty0 via kernelParams / kexec cmdline,
+ * so duplicating them in the DTB just creates merge friction. */
+
+&sdhci1 {
+	/* Frees PIN_SD1_* for IIC1 below. The clkgen / wifi-power
+	 * properties bw.dtsi sets become inert once status is disabled. */
+	status = "disabled";
+};
+
+&pinctrl {
+	i2c1_cfg: i2c1-cfg {
+		i2c1-pins {
+			pinmux = <PINMUX(PIN_SD1_D3, 2)>,
+				 <PINMUX(PIN_SD1_D0, 2)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+};
+
+&i2c1 {
+	pinctrl-0 = <&i2c1_cfg>;
+	pinctrl-names = "default";
+	clock-frequency = <400000>;
+	status = "okay";
+
+	oled@3c {
+		compatible = "solomon,ssd1306fb-i2c";
+		reg = <0x3c>;
+		solomon,width = <128>;
+		solomon,height = <64>;
+		solomon,page-offset = <0>;
+		solomon,com-offset = <0>;
+	};
+};

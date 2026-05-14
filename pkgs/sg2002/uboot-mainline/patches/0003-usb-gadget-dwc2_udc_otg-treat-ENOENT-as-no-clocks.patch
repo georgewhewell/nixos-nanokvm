@@ -1,0 +1,40 @@
+From 444728e5e9861f503822882f566be205a682ac8a Mon Sep 17 00:00:00 2001
+From: George Watson <george@hellas.ai>
+Date: Fri, 24 Apr 2026 12:49:26 +0200
+Subject: [PATCH 3/4] usb: gadget: dwc2_udc_otg: treat -ENOENT as no clocks
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+dwc2_udc_otg_clk_init() already treats -ENOSYS ("no clk support") as a
+successful no-op, but returns every other error — including -ENOENT,
+which clk_get_bulk() returns when the node has no "clocks" property at
+all. On CV1800 boards our -u-boot.dtsi overlay deliberately omits a
+clocks phandle because U-Boot has no CV1800 USB clock driver, so probe
+fails with -ENOENT before reset_init/phy_setup get a chance to run.
+
+The FSBL leaves the USB block clocked and its phy powered; treat
+-ENOENT the same as -ENOSYS so the probe succeeds without clocks on
+platforms that need it.
+
+Signed-off-by: George Watson <george@hellas.ai>
+---
+ drivers/usb/gadget/dwc2_udc_otg.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/usb/gadget/dwc2_udc_otg.c b/drivers/usb/gadget/dwc2_udc_otg.c
+index e475b14b..893297cd 100644
+--- a/drivers/usb/gadget/dwc2_udc_otg.c
++++ b/drivers/usb/gadget/dwc2_udc_otg.c
+@@ -1056,7 +1056,7 @@ static int dwc2_udc_otg_clk_init(struct udevice *dev,
+ 	int ret;
+ 
+ 	ret = clk_get_bulk(dev, clks);
+-	if (ret == -ENOSYS)
++	if (ret == -ENOSYS || ret == -ENOENT)
+ 		return 0;
+ 
+ 	if (ret)
+-- 
+2.53.0
+

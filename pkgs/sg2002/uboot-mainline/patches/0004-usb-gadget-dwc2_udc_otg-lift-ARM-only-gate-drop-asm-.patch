@@ -1,0 +1,67 @@
+From 138510fc2e1eae33ce5f38739e1841eda5e699cb Mon Sep 17 00:00:00 2001
+From: George Watson <george@hellas.ai>
+Date: Fri, 24 Apr 2026 12:49:51 +0200
+Subject: [PATCH 4/4] usb: gadget: dwc2_udc_otg: lift ARM-only gate, drop
+ asm/mach-types.h
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Let the DesignWare HS-OTG gadget driver build on RISC-V (and any other
+arch that grows a dwc2 consumer). The driver itself references no
+MACH_* symbols, so the asm/mach-types.h include was vestigial — it's a
+leftover from the legacy board-specific ARM build and isn't needed for
+anything.
+
+Without this change, on RISC-V you'd need an asm/mach-types.h that
+doesn't exist, even though the underlying IP is cross-arch (CV1800,
+BCM2835, STM32, Rockchip, etc. all ship dwc2).
+
+Signed-off-by: George Watson <george@hellas.ai>
+---
+ drivers/usb/gadget/Kconfig            | 1 -
+ drivers/usb/gadget/dwc2_udc_otg.c     | 2 --
+ drivers/usb/gadget/dwc2_udc_otg_phy.c | 2 --
+ 3 files changed, 5 deletions(-)
+
+diff --git a/drivers/usb/gadget/Kconfig b/drivers/usb/gadget/Kconfig
+index ebb30685..71bb6f21 100644
+--- a/drivers/usb/gadget/Kconfig
++++ b/drivers/usb/gadget/Kconfig
+@@ -108,7 +108,6 @@ config USB_GADGET_AT91
+ 
+ config USB_GADGET_DWC2_OTG
+ 	bool "DesignWare USB2.0 HS OTG controller (gadget mode)"
+-	depends on ARM
+ 	select USB_GADGET_DUALSPEED
+ 	help
+ 	  The Designware USB2.0 high-speed gadget controller
+diff --git a/drivers/usb/gadget/dwc2_udc_otg.c b/drivers/usb/gadget/dwc2_udc_otg.c
+index 893297cd..7b00a2a8 100644
+--- a/drivers/usb/gadget/dwc2_udc_otg.c
++++ b/drivers/usb/gadget/dwc2_udc_otg.c
+@@ -42,8 +42,6 @@
+ #include <asm/unaligned.h>
+ #include <asm/io.h>
+ 
+-#include <asm/mach-types.h>
+-
+ #include <power/regulator.h>
+ 
+ #include "../common/dwc2_core.h"
+diff --git a/drivers/usb/gadget/dwc2_udc_otg_phy.c b/drivers/usb/gadget/dwc2_udc_otg_phy.c
+index e0ac5d14..59216094 100644
+--- a/drivers/usb/gadget/dwc2_udc_otg_phy.c
++++ b/drivers/usb/gadget/dwc2_udc_otg_phy.c
+@@ -29,8 +29,6 @@
+ #include <asm/unaligned.h>
+ #include <asm/io.h>
+ 
+-#include <asm/mach-types.h>
+-
+ #include "dwc2_udc_otg_regs.h"
+ #include "dwc2_udc_otg_priv.h"
+ 
+-- 
+2.53.0
+

@@ -1,0 +1,61 @@
+From: George Watson <george@hellas.ai>
+Date: Mon, 11 May 2026 19:30:00 +0200
+Subject: [PATCH] nbd: do not tear down sockets when NBD_DO_IT is interrupted
+ by SIGSTOP
+
+`nbd_start_device_ioctl` (the kernel-side body of `NBD_DO_IT`) waits
+for all receive threads to finish via `wait_event_interruptible`. That
+returns -ERESTARTSYS for *any* signal that wakes the task — including
+SIGSTOP, which cannot be ignored by userspace.
+
+systemd's `broadcast_signal()` in `src/shared/killall.c` does, in
+sequence, `kill(-1, SIGSTOP)` → `killall(SIGTERM, …)` → `kill(-1,
+SIGCONT)` when handling MANAGER_SWITCH_ROOT and MANAGER_SOFT_REBOOT.
+The SIGSTOP half of that briefly stops every userspace process,
+including a userspace `nbd-client` that is sitting in `NBD_DO_IT`.
+
+When `wait_event_interruptible` wakes due to that SIGSTOP, the very
+next lines of `nbd_start_device_ioctl` call `sock_shutdown(nbd)` and
+`nbd_clear_que(nbd)`, *unconditionally* tearing down the NBD socket
+and erroring out every in-flight request. The connection is now dead,
+and any rootfs that lives on this nbd device EIOs immediately — even
+though the userspace nbd-client was perfectly healthy, was woken up
+by SIGCONT a moment later, would happily have ignored the SIGTERM via
+its installed handler / SIG_IGN disposition, and would have continued
+servicing requests.
+
+For NBD-as-rootfs setups under systemd-in-initrd, this makes
+`switch-root` impossible: the kernel tears down the rootfs NBD just
+before systemd execs `/sbin/init` from /sysroot, and the exec fails
+("No /sbin/init, trying fallback shell").
+
+Switch the wait to `wait_event_killable`. That still allows SIGKILL
+to break out of the ioctl (which is what userspace needs to actually
+shut nbd-client down cleanly), but ignores transient stop/cont and
+catchable-but-handled signals — exactly matching the semantics the
+caller actually wants. SIGTERM with a userspace handler still gets
+delivered when the task returns to userspace; the userspace handler
+decides whether to call NBD_DISCONNECT explicitly.
+
+Reproducer: any `nbd-client -n /dev/nbd0 …` running under a systemd
+service through a `systemctl switch-root` transition.
+
+Signed-off-by: George Watson <george@hellas.ai>
+---
+ drivers/block/nbd.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/block/nbd.c b/drivers/block/nbd.c
+--- a/drivers/block/nbd.c
++++ b/drivers/block/nbd.c
+@@ -1552,8 +1552,8 @@ static int nbd_start_device_ioctl(struct nbd_device *nbd)
+ 	if (max_part)
+ 		set_bit(GD_NEED_PART_SCAN, &nbd->disk->state);
+ 	mutex_unlock(&nbd->config_lock);
+-	ret = wait_event_interruptible(config->recv_wq,
+-					 atomic_read(&config->recv_threads) == 0);
++	ret = wait_event_killable(config->recv_wq,
++					  atomic_read(&config->recv_threads) == 0);
+ 	if (ret) {
+ 		sock_shutdown(nbd);
+ 		nbd_clear_que(nbd);

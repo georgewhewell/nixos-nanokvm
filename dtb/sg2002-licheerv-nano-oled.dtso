@@ -1,0 +1,55 @@
+/dts-v1/;
+/plugin/;
+
+/*
+ * Runtime overlay for the LicheeRV Nano OLED test path.
+ *
+ * The base DTB comes from /sys/firmware/fdt so kexec preserves the exact
+ * USB/runtime state U-Boot gave the current kernel. This overlay only
+ * trades SDIO1/WiFi pads for IIC1 and adds the SSD1306-compatible panel.
+ */
+
+/ {
+	fragment@0 {
+		target-path = "/soc/mmc@4320000";
+
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@1 {
+		target-path = "/soc/pinctrl@3001000";
+
+		__overlay__ {
+			i2c1_cfg: i2c1-cfg {
+				i2c1-pins {
+					pinmux = <0xff020033 0xff020036>;
+					bias-pull-up;
+					drive-strength-microamp = <10800>;
+					power-source = <3300>;
+				};
+			};
+		};
+	};
+
+	fragment@2 {
+		target-path = "/soc/i2c@4010000";
+
+		__overlay__ {
+			pinctrl-0 = <&i2c1_cfg>;
+			pinctrl-names = "default";
+			clock-frequency = <400000>;
+			status = "okay";
+
+			oled@3c {
+				compatible = "solomon,ssd1306fb-i2c";
+				reg = <0x3c>;
+				solomon,width = <128>;
+				solomon,height = <64>;
+				solomon,page-offset = <0>;
+				solomon,com-offset = <0>;
+			};
+		};
+	};
+};

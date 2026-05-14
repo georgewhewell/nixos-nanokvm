@@ -1,0 +1,19 @@
+result
+result-*
+.direnv
+# WPA supplicant config baked into the wifi-mode initrd. Lives outside
+# git so credentials don't leak. Note: the contents still end up in the
+# Nix store (world-readable on a multi-user system) once the flake is
+# evaluated — fine for diagnostic builds, not for prod.
+wifi.conf
+
+# Per-device snapshots taken before flashing (wifi PSK, tailscaled state,
+# vendor /etc/kvm files). Always sensitive; never commit.
+secrets/
+
+# Host-side cached SSH host keys, generated/persisted by mkUsbBootRunner
+# on first usb-boot and pushed to the device via the initrd debug shell
+# so the SG2002 doesn't have to spend ~60 s wall-clock on sshd-keygen
+# every boot. Per-developer, not committed.
+.ssh_host_*_key
+.ssh_host_*_key.pub

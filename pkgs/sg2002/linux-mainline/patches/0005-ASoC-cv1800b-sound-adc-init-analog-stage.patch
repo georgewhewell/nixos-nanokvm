@@ -1,0 +1,210 @@
+From: George Wilkins <george@hellas.ai>
+Date: Sun, 26 Apr 2026 11:00:00 +0200
+Subject: ASoC: cv1800b-sound-adc: init RXADC analog stage
+
+The mainline cv1800b-sound-adc driver writes CTRL0/CTRL1/CLK/ANA0
+(gain) and nothing else. With the DMA path patched (dw-axi-dmac with
+the CV1800B compatible), arecord opens cleanly and DMA fires, but the
+RXADC produces only zero samples — the analog stage never actually
+gets brought up.
+
+Add a one-shot warm-up at probe time and the rate-dependent ANA3
+write in hw_params, mirroring what the vendor cv181xadc driver does
+across its hw_params + prepare + cv182xa_reset_adc paths:
+
+  - Toggle the audio system reset (0x03003008 BIT(29) — the
+    CV182XA_ADC_RESET mask) at probe to force the analog island out
+    of any leftover post-POR state on boards that didn't go through
+    vendor U-Boot.
+  - ANA6 force-on overrides at probe: pin RXPGA / END2US / RXADC /
+    AUDBIAS enable bits high via the OW_EN/OW_VAL pair. ANA4 status
+    bits read as 0 on this board, so the auto-enable path the SoC
+    expects isn't kicking in; the override register is the
+    documented escape hatch.
+  - Clear ANA2.MUTEL_RXPGA / MUTER_RXPGA at probe in case probe
+    defaults left the input stage muted.
+  - Cross-block ECO at probe: clear TXDAC.ANA0[0] (ADDI_TXDAC) via
+    ioremap of 0x0300A020. Vendor cv181xadc does the same — comment
+    in vendor source: "ECO function, register naming is not
+    corrected, use ioremap to access register of DAC".
+  - msleep(300) at probe so the PGA + DC-bias rails are fully
+    settled before any capture is opened. Without this, the first
+    ~250 ms of recorded samples rail-clip while the analog stage
+    stabilises. Doing it from probe rather than hw_params keeps the
+    cost one-shot at boot — no per-stream latency.
+  - ANA3.CTUNE_RXADC = 0xC in hw_params for 12.288 MHz MCLK at
+    48 kHz (the only rate the codec advertises). Vendor sets this
+    in hw_params per sample rate.
+
+Origin: derived from milkv-duo/duo-buildroot-sdk
+        linux_5.10/sound/soc/cvitek/cv181xadc.c hw_params and
+        linux_5.10/sound/soc/cvitek/cv1835_i2s_subsys.c cv182xa_reset_adc.
+
+Signed-off-by: George Wilkins <george@hellas.ai>
+---
+--- a/sound/soc/sophgo/cv1800b-sound-adc.c
++++ b/sound/soc/sophgo/cv1800b-sound-adc.c
+@@ -11,6 +11,7 @@
+ #include <sound/tlv.h>
+ #include <sound/soc-component.h>
+ #include <sound/control.h>
++#include <linux/delay.h>
+ #include <linux/io.h>
+ #include <linux/kernel.h>
+ #include <linux/bitops.h>
+@@ -27,11 +28,49 @@
+ #define CV1800B_RXADC_ANA2     0x18
+ #define CV1800B_RXADC_ANA3     0x1c
+ #define CV1800B_RXADC_ANA4     0x20
++#define CV1800B_RXADC_ANA5     0x24
++#define CV1800B_RXADC_ANA6     0x28
+ 
+ /* CV1800B_RXADC_CTRL0 */
+ #define REG_RXADC_EN                   GENMASK(0, 0)
+ #define REG_I2S_TX_EN                  GENMASK(1, 1)
+ 
++/* CV1800B_RXADC_ANA3 */
++#define REG_CTUNE_RXADC                GENMASK(11, 8)
++
++/* CV1800B_RXADC_ANA6 — analog block enable overrides */
++#define REG_DA_EN_RXPGA_OW_VAL         BIT(0)
++#define REG_DA_END2US_RXPGA_OW_VAL     BIT(1)
++#define REG_DA_EN_RXADC_OW_VAL         BIT(2)
++#define REG_DA_EN_AUDBIAS_OW_VAL       BIT(3)
++#define REG_DA_EN_RXPGA_OW_EN          BIT(16)
++#define REG_DA_END2US_RXPGA_OW_EN      BIT(17)
++#define REG_DA_EN_RXADC_OW_EN          BIT(18)
++#define REG_DA_EN_AUDBIAS_OW_EN        BIT(19)
++#define ANA6_FORCE_ALL_ON \
++	(REG_DA_EN_RXPGA_OW_VAL | REG_DA_END2US_RXPGA_OW_VAL | \
++	 REG_DA_EN_RXADC_OW_VAL | REG_DA_EN_AUDBIAS_OW_VAL  | \
++	 REG_DA_EN_RXPGA_OW_EN  | REG_DA_END2US_RXPGA_OW_EN | \
++	 REG_DA_EN_RXADC_OW_EN  | REG_DA_EN_AUDBIAS_OW_EN)
++
++/*
++ * Cross-block ECO: TXDAC.ANA0[0] (ADDI_TXDAC) gates the analog input
++ * path on the RXADC side. Vendor cv181xadc clears it from ADC hw_params.
++ */
++#define CV1800B_TXDAC_BASE             0x0300A000
++#define CV1800B_TXDAC_ANA0_OFFSET      0x20
++#define REG_ADDI_TXDAC                 BIT(0)
++
++/*
++ * System reset register controlling the audio analog block. Bit 29 is
++ * the RXADC reset (CV182XA_ADC_RESET = 0xDFFFFFFF in vendor source).
++ * Toggling brings the analog island out of any leftover power-on
++ * default and forces a clean state — without this, on boards where the
++ * vendor U-Boot didn't run, the RXADC enables but never samples.
++ */
++#define CV1800B_AUDIO_SYSRESET         0x03003008
++#define BIT_RXADC_RESET                BIT(29)
++
+ /* CV1800B_RXADCC_CTRL1 */
+ #define REG_RXADC_CIC_OPT              GENMASK(1, 0)
+ #define REG_RXADC_IGR_INIT             GENMASK(8, 8)
+@@ -171,11 +210,21 @@
+ 		return ret;
+ 	}
+ 
+-	/* init adc */
++	/* Rate-dependent: CIC decimation factor + IGR init. */
+ 	val = readl(priv->regs + CV1800B_RXADCC_CTRL1);
+ 	val = u32_replace_bits(val, 1, REG_RXADC_IGR_INIT);
+ 	val = u32_replace_bits(val, DECIMATION_64, REG_RXADC_CIC_OPT);
+ 	writel(val, priv->regs + CV1800B_RXADCC_CTRL1);
++
++	/*
++	 * Rate-dependent: SDM capacitor tuning. The codec only advertises
++	 * 48 kHz so MCLK is always 12.288 MHz here; CTUNE = 0xC matches
++	 * that on SG2000/SG2002 per the vendor cv181xadc driver.
++	 */
++	val = readl(priv->regs + CV1800B_RXADC_ANA3);
++	val = u32_replace_bits(val, 0xC, REG_CTUNE_RXADC);
++	writel(val, priv->regs + CV1800B_RXADC_ANA3);
++
+ 	return 0;
+ }
+ 
+@@ -277,6 +326,72 @@
+ 	.num_controls = ARRAY_SIZE(cv1800b_adc_controls),
+ };
+ 
++/*
++ * One-shot RXADC analog warm-up. Runs from probe so the rails are up
++ * by the time any capture is opened — no per-stream latency, no rail-
++ * clip transient on first samples. Idempotent: every register touched
++ * is sticky across captures, so we don't repeat it from hw_params.
++ */
++static void cv1800b_adc_init_analog(struct cv1800b_priv *priv)
++{
++	void __iomem *sysreset;
++	void __iomem *txdac;
++	u32 reset_val, dac_ana0, val;
++
++	/*
++	 * Pulse the audio system reset (0x03003008 BIT(29)). On boards
++	 * where vendor U-Boot didn't bring up the audio island, the
++	 * analog block stays in an undefined post-POR state; the toggle
++	 * forces a clean one. Mirror of vendor cv1835_i2s_subsys.c
++	 * cv182xa_reset_adc.
++	 */
++	sysreset = ioremap(CV1800B_AUDIO_SYSRESET, 4);
++	if (sysreset) {
++		reset_val = readl(sysreset);
++		writel(reset_val & ~BIT_RXADC_RESET, sysreset);
++		writel(reset_val | BIT_RXADC_RESET, sysreset);
++		iounmap(sysreset);
++	}
++
++	/*
++	 * Force PGA, RXADC core, AUDBIAS, and END2US rails on via the
++	 * ANA6 override register. ANA4 status bits read as 0 on this
++	 * board (the auto-enable path the SoC expects isn't kicking in),
++	 * so the OW_EN/OW_VAL escape hatch is the only way to bring the
++	 * analog stage up.
++	 */
++	writel(ANA6_FORCE_ALL_ON, priv->regs + CV1800B_RXADC_ANA6);
++
++	/* Clear MUTEL_RXPGA / MUTER_RXPGA in case probe defaults left
++	 * the input stage muted. */
++	val = readl(priv->regs + CV1800B_RXADC_ANA2);
++	val &= ~(REG_MUTEL_RXPGA | REG_MUTER_RXPGA);
++	writel(val, priv->regs + CV1800B_RXADC_ANA2);
++
++	/*
++	 * Cross-block ECO. TXDAC.ANA0[ADDI_TXDAC] gates the RXADC analog
++	 * frontend even though it lives in the DAC's MMIO region (vendor
++	 * comment: "register naming is not corrected"). Without clearing
++	 * this bit the RXADC enables but never feeds samples out.
++	 */
++	txdac = ioremap(CV1800B_TXDAC_BASE, 0x30);
++	if (txdac) {
++		dac_ana0 = readl(txdac + CV1800B_TXDAC_ANA0_OFFSET);
++		dac_ana0 &= ~REG_ADDI_TXDAC;
++		writel(dac_ana0, txdac + CV1800B_TXDAC_ANA0_OFFSET);
++		iounmap(txdac);
++	}
++
++	/*
++	 * Settle the analog rails before any capture sees them. The PGA
++	 * and DC-bias rails take ~250 ms to stabilise after the ANA6
++	 * force-on; without this delay, the first samples after trigger
++	 * START rail-clip. msleep is fine here — probe is allowed to
++	 * sleep, and the cost is one-time at boot rather than per-capture.
++	 */
++	msleep(300);
++}
++
+ static int cv1800b_adc_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -292,6 +407,9 @@
+ 		return PTR_ERR(priv->regs);
+ 
+ 	platform_set_drvdata(pdev, priv);
++
++	cv1800b_adc_init_analog(priv);
++
+ 	return devm_snd_soc_register_component(&pdev->dev,
+ 					       &cv1800b_adc_component,
+ 					       &cv1800b_adc_dai, 1);

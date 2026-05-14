@@ -1,0 +1,19 @@
+/* No-WiFi overlay — concatenated AFTER sg2002-licheerv-nano-bw.dtsi.
+ *
+ * Just turns sdhci1 (the AIC8800DC SDIO bus) off. The bw.dtsi enables
+ * sdhci1 and provides all the AIC8800 power/clkgen quirks, but on the
+ * mainline 7.0.x kernel the AIC8800 init sequence is fragile — if any
+ * step misfires, the sdhci driver spins on `mmc1: Timeout waiting for
+ * hardware cmd interrupt` every ~3 s for the rest of the boot, full
+ * SDHCI register dump per cycle. That eats CPU and (more importantly
+ * on the USB-boot path) contends with the USB OTG gadget for the
+ * SoC's bus, causing NBD reads to drop and the rootfs to EIO out.
+ *
+ * Pair with builds that don't need WiFi (USB-boot, NBD live, etc.).
+ * Mutually exclusive with the OLED overlay only in the sense that you
+ * don't need both — the OLED variant already disables sdhci1.
+ */
+
+&sdhci1 {
+	status = "disabled";
+};

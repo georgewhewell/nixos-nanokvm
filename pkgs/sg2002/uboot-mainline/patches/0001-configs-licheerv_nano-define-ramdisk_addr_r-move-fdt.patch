@@ -1,0 +1,45 @@
+From 572f82cfe266e0150ab33d75a72755c020313b7e Mon Sep 17 00:00:00 2001
+From: George Watson <george@hellas.ai>
+Date: Fri, 24 Apr 2026 12:48:42 +0200
+Subject: [PATCH 1/4] configs: licheerv_nano: define ramdisk_addr_r, move fdt
+ above kernel
+
+Upstream include/configs/licheerv_nano.h forgot to define ramdisk_addr_r,
+so distro_bootcmd's extlinux loader bails with "missing environment
+variable: ramdisk_addr_r" and skips every entry in extlinux.conf.
+
+Also move fdt_addr_r above the kernel load region so a 30+ MB Image at
+0x81000000 doesn't clobber the FDT.
+
+Signed-off-by: George Watson <george@hellas.ai>
+---
+ include/configs/licheerv_nano.h | 14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/include/configs/licheerv_nano.h b/include/configs/licheerv_nano.h
+index 2ea7943f..2d96372f 100644
+--- a/include/configs/licheerv_nano.h
++++ b/include/configs/licheerv_nano.h
+@@ -14,11 +14,13 @@
+ 
+ #define CFG_SYS_SDRAM_BASE         0x80000000
+ 
+-#define CFG_EXTRA_ENV_SETTINGS  "consoledev=ttyS0\0" \
+-								"baudrate=115200\0" \
+-								"fdt_addr_r=0x82000000\0" \
+-								"kernel_addr_r=0x81000000\0" \
+-								"scriptaddr=0x80c00000\0" \
+-								BOOTENV
++#define CFG_EXTRA_ENV_SETTINGS \
++	"consoledev=ttyS0\0" \
++	"baudrate=115200\0" \
++	"kernel_addr_r=0x81000000\0"    \
++	"fdt_addr_r=0x83000000\0"       \
++	"ramdisk_addr_r=0x85000000\0"   \
++	"scriptaddr=0x80c00000\0"       \
++	BOOTENV
+ 
+ #endif /* __CONFIG_H */
+-- 
+2.53.0
+

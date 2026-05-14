@@ -1,0 +1,47 @@
+From: George Watson <george@hellas.ai>
+Date: Tue, 12 May 2026 14:30:00 +0200
+Subject: [PATCH] server: skip kvm-vision init entirely when HDMI is disabled
+
+`initialize()` always calls `common.GetKvmVision()`, which through cgo
+fires the vendor SDK's `kvmv_init` -> `SAMPLE_COMM_VI_ParseIni` ->
+sensor-config probe. On mainline kernels the cv1800b camera/IPS
+sample helpers can't find the vendor sensor wiring, ParseIni returns
+0xffffffff, and the helper then dereferences a null sensor descriptor
+and SEGVs. The whole nanokvm-server crash-loops at startup with
+`Main process exited, code=killed, status=11/SEGV`.
+
+The existing `utils.IsHdmiDisabled()` check is honored further down,
+but only to skip `SetHDMI(true)` -- it doesn't guard `GetKvmVision()`,
+which is what actually runs the SDK init. Move the whole vision
+init under the same guard so that when `/etc/kvm/hdmi_disabled`
+exists, the server boots without ever touching the camera subsystem.
+
+This lets the web UI come up on platforms where mainline doesn't (yet)
+have working HDMI capture, while still preserving the original code
+path on the vendor 5.10 image-based-appliance kernel.
+---
+diff -u a/server/main.go b/server/main.go
+--- a/server/main.go
++++ b/server/main.go
+@@ -37,11 +37,17 @@
+ 	// init screen parameters
+ 	_ = common.GetScreen()
+
+-	// init HDMI
+-	vision := common.GetKvmVision()
+-	vision.SetHDMI(false)
+-	time.Sleep(10 * time.Millisecond)
++	// init HDMI. Guarded behind IsHdmiDisabled() so that on platforms
++	// where the vendor `kvmv_init` cgo binding SEGVs (mainline kernels
++	// without the cv1800 sample VI / sensor INI), creating
++	// /etc/kvm/hdmi_disabled stops the server from crash-looping. The
++	// original code always called GetKvmVision() — which is the
++	// segfaulting path — and only used IsHdmiDisabled() to decide
++	// whether to re-enable after the initial toggle.
+ 	if !utils.IsHdmiDisabled() {
++		vision := common.GetKvmVision()
++		vision.SetHDMI(false)
++		time.Sleep(10 * time.Millisecond)
+ 		vision.SetHDMI(true)
+ 	}
+

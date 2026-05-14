@@ -1,0 +1,474 @@
+/* SG2002 LicheeRV Nano B-W overlay: adds onboard AIC8800DC WiFi support
+ * on top of the upstream sg2002-licheerv-nano-b.dts. Concatenated with
+ * the base DTS at build time; dtc merges nodes and lets this file
+ * override the `model`/`compatible`/`chosen` and add pinctrl + sdhci1.
+ *
+ * The "B-W" SKU is the variant carrying the AIC8800DC SDIO WiFi/BT
+ * module. compatible cascades to the upstream `sipeed,licheerv-nano-b`
+ * so U-Boot's bootflow compatible-match still finds this DTB without
+ * any U-Boot-side changes. */
+
+#include <dt-bindings/clock/sophgo,cv1800.h>
+
+/ {
+	model = "Sipeed LicheeRV Nano B-W";
+	compatible = "sipeed,licheerv-nano-bw",
+		     "sipeed,licheerv-nano-b",
+		     "sipeed,licheerv-nano",
+		     "sophgo,sg2002";
+
+	chosen {
+		bootargs = "console=ttyGS0,115200 console=ttyS0,115200 earlycon=sbi root=/dev/disk/by-label/NIXOS_SD rootwait";
+	};
+};
+
+&usb {
+	dr_mode = "peripheral";
+
+	/* Mirror the FIFO sizing we ship in U-Boot
+	 * (`uboot-mainline/patches/0002-…-u-boot.dtsi-wit.patch`). The mainline
+	 * dwc2 driver reads these per-endpoint TX FIFO depths and the
+	 * RX/non-periodic-TX depths from DT; without them it falls back to
+	 * dwc2's compile-time defaults (CONFIG_USB_DWC2_HOST_/_PERIPHERAL_
+	 * sizes), which on cv1800 leave the periodic-TX FIFOs at 64 entries
+	 * total and the RX FIFO at 1024. Under sustained bulk-OUT traffic
+	 * (NBD reads pumping into usb0), the host's TX queue can hand more
+	 * packets than the gadget can drain → `cdc_ether transmit queue 0
+	 * timed out 5000 ms`, the queue freezes, and the link dies.
+	 *
+	 * Values match what the U-Boot dwc2_udc_otg gadget uses on the same
+	 * silicon: 1536-byte RX, 32-entry non-periodic-TX, and 8 periodic-TX
+	 * FIFOs (128/128/64/64/64/64/32/32) for IN endpoints 1..8. CDC-ECM's
+	 * bulk IN sits on EP1 → the 128-entry FIFO. */
+	g-rx-fifo-size = <1536>;
+	g-np-tx-fifo-size = <32>;
+	g-tx-fifo-size = <128 128 64 64 64 64 32 32>;
+};
+
+&pinctrl {
+	/* Vendor U-Boot muxes the onboard WiFi enable line through
+	 * EMMC_DAT2 as GPIOA26 and the SD1_* pads into SDIO mode before
+	 * Linux starts. Mainline leaves these pads unclaimed, so teach
+	 * pinctrl the same board wiring. */
+	wifi_pwr_cfg: wifi-pwr-cfg {
+		wifi-pwr-pins {
+			pinmux = <PINMUX(PIN_EMMC_DAT2, 3)>;
+			bias-pull-down;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+
+	/* I2C0 on the dedicated IIC0 pair — pull-ups are required by
+	 * the I2C protocol and the on-die pad pulls (~50 kΩ) are weak;
+	 * external 4.7-10 kΩ resistors on the user's wiring are still
+	 * the right answer if they're driving long traces. */
+	i2c0_cfg: i2c0-cfg {
+		i2c0-pins {
+			pinmux = <PINMUX(PIN_IIC0_SCL, 0)>,
+				 <PINMUX(PIN_IIC0_SDA, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+
+	sdhci1_cfg: sdhci1-cfg {
+		sdhci1-clk-pins {
+			pinmux = <PINMUX(PIN_SD1_CLK, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <16100>;
+			power-source = <3300>;
+		};
+
+		sdhci1-cmd-pins {
+			pinmux = <PINMUX(PIN_SD1_CMD, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+
+		sdhci1-data-pins {
+			pinmux = <PINMUX(PIN_SD1_D0, 0)>,
+				 <PINMUX(PIN_SD1_D1, 0)>,
+				 <PINMUX(PIN_SD1_D2, 0)>,
+				 <PINMUX(PIN_SD1_D3, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+};
+
+/* SDIO controller wired to the onboard AIC8800DC WiFi+BT chip.
+ * Upstream DT leaves sdhci1 disabled. Properties cribbed from
+ * sg2002-milkv-duo-s / cv1812h-huashan-pi (same SoC family, same
+ * AIC8800DC SDIO layout):
+ *   - cap-sdio-irq      — SDIO in-band interrupts; without this CMD5
+ *                         gets no response and mmc1 bails with
+ *                         "Failed to initialize a non-removable card"
+ *   - non-removable + no-mmc + no-sd — SDIO only
+ *   - disable-wp        — no write-protect pin
+ *   - max-frequency 50 MHz — matches huashan-pi
+ *   - resets = <&rst 17>   — deassert SDIO1 soft reset. Mainline
+ *     U-Boot leaves this asserted; the cv18xx ops path in
+ *     sdhci-of-dwcmshc never consumed a reset, so the IP stayed dead
+ *     (caps read back but mmc_rescan never powers the host up). The
+ *     paired kernel patch sdhci-of-dwcmshc-cv18xx-reset adds an init
+ *     callback that reads this property. Reset ID 17 = RST_SD1 per
+ *     the Sophgo vendor cv181x-resets.h (0x03003000 bit 17: 1=running). */
+&sdhci1 {
+	status = "okay";
+	bus-width = <4>;
+	pinctrl-0 = <&sdhci1_cfg &wifi_pwr_cfg>;
+	pinctrl-names = "default";
+	cap-sdio-irq;
+	disable-wp;
+	non-removable;
+	no-mmc;
+	no-sd;
+	max-frequency = <50000000>;
+	resets = <&rst 17>;
+
+	/* CLKGEN fixup — see sdhci-of-dwcmshc-cv18xx-reset.patch.
+	 * Mainline U-Boot leaves mmc1 on the XTAL bypass path so
+	 * SDHCI_CLOCK_INT_STABLE never latches. Write the PLL divider
+	 * (0x40009 matches vendor MMC_MAX_CLOCK_DIV_VALUE for 375 MHz)
+	 * to 0x0300207C and clear bit 7 of the CLKGEN bypass-select
+	 * register at 0x03002030 to route mmc1 off XTAL.
+	 *
+	 * Per the mainline sophgo,cv1800b-clk driver, clk_sd1 has its
+	 * mux AND divider packed into 0x0300207C:
+	 *   bits [9:8]   = mux select (0=osc 1=fpll 2=disppll)
+	 *   bits [20:16] = 5-bit divider
+	 *   bit  0       = enable
+	 * Vendor writes 0x40009 (mux=0 osc, div=4) but that only works
+	 * on vendor SW because their CCF is on an OSC-tied path. On
+	 * mainline we need to pick fpll:
+	 *   0x40109 = mux=1 fpll(1500MHz), div=4 -> 375MHz. */
+	sophgo,sdio-clkgen-pll-reg = <0x0300207C>;
+	sophgo,sdio-clkgen-pll-div = <0x00040109>;
+	sophgo,sdio-clkgen-bypass-reg = <0x03002030>;
+	sophgo,sdio-clkgen-bypass-bit = <7>;
+
+	/* AIC8800 power-enable is GPIOA26, wired out on the EMMC_DAT2
+	 * pad. wifi_pwr_cfg above describes the board wiring, but on
+	 * clean boot the raw pad register still comes up as function 1
+	 * (JTAG), so the driver also flips the register to GPIO
+	 * function 3 before toggling power. */
+	sophgo,wifi-power-pinmux-reg = <0x0300104C>;
+	wifi-power-gpios = <&porta 26 0>;
+
+	/* Last two vendor u-boot inits we hadn't replicated:
+	 *   - rtc2ap AHB bridge at 0x03000248 (write 0x1 on every SDIO1
+	 *     bind — opens the RTC-domain → AP bridge)
+	 *   - SDIO pad drive-strength bank at 0x05027058 (always-on
+	 *     island, DAT/CMD = 1<<2, CLK = 2<<2)
+	 * These are the remaining things the vendor u-boot does before
+	 * Linux that we haven't; needed past cmd 1037 DBG_START_APP_REQ
+	 * timeout. */
+	sophgo,rtc2ap-bridge-reg = <0x03000248>;
+	sophgo,sdio-pad-cfg-base = <0x05027058>;
+};
+
+/* DesignWare WDT at 0x03010000. Upstream sg2002.dtsi has every piece
+ * in place (CLK_APB_WDT=58 in the clock header, the RST_WDT=48 reset
+ * line, dw_wdt driver + snps,dw-wdt binding) except this node — add
+ * it so the kernel binds /dev/watchdog0. systemd then pets it via
+ * RuntimeWatchdogSec=30s (see modules/includes/usb-recovery.nix).
+ * Reset id is the literal 48 because RST_WDT from cv18xx-reset.h
+ * isn't exposed as a UAPI dt-bindings header. */
+/* The SNPS AXI DMA controller is `status = "disabled"` by default in
+ * upstream cv180x.dtsi. Enable it here — audio (i2s → ADC/DAC) needs
+ * DMA channels via the dmamux. Without this the dw_axi_dmac driver
+ * never binds and every DMA-using child defers probe.
+ *
+ * Override compatible to `sophgo,cv1800b-axi-dma` (paired with the
+ * dw-axi-dmac CV1800B-support kernel patch). With the generic
+ * `snps,axi-dma-1.01a`, dw_axi_dma_of_xlate calls
+ * dma_get_any_slave_channel() which picks any free channel — but the
+ * dmamux registers the I2S handshake against a *specific* channel ID.
+ * The mismatch means transfers fire on the wrong channel and IRQs
+ * never come back, so arecord opens cleanly then reads return -EIO. */
+&dmac {
+	compatible = "sophgo,cv1800b-axi-dma";
+	status = "okay";
+};
+
+&{/soc} {
+	watchdog: watchdog@3010000 {
+		compatible = "snps,dw-wdt";
+		reg = <0x03010000 0x1000>;
+		clocks = <&clk CLK_APB_WDT>;
+		resets = <&rst 48>;
+		/* CV1800/SG2002 synthesizes the WDT IP with
+		 * WDT_USE_FIX_TOP=0 (i.e. programmable TOPs) but doesn't
+		 * publish the synthesis-time TOP values via DT, so the
+		 * dw_wdt driver warns "No valid TOPs array specified" and
+		 * falls back to its private dw_wdt_fix_tops (1<<16..1<<31).
+		 * Empirically the silicon honours those exact values —
+		 * verified by reading WDT_CCVR after a kick at top_val=14:
+		 * counter reloads to 0x40000000 = 1<<30 = 42.95 s at the
+		 * 25 MHz CLK_APB_WDT, matching dw_wdt_fix_tops[14]. So
+		 * declare them explicitly; this just suppresses the warning
+		 * and locks the driver/hardware contract. */
+		snps,watchdog-tops = <0x00010000 0x00020000 0x00040000 0x00080000
+				      0x00100000 0x00200000 0x00400000 0x00800000
+				      0x01000000 0x02000000 0x04000000 0x08000000
+				      0x10000000 0x20000000 0x40000000 0x80000000>;
+		status = "okay";
+	};
+
+	/* On-die "tempsen" sensor. Driver in our 0006 kernel patch
+	 * (backport of Haylen Chu's v5 LKML series); compatible
+	 * sophgo,cv1800-thermal. The driver requires the IRQ for
+	 * thermal-zone trip notifications — without an `interrupts`
+	 * property, platform_get_irq() in probe returns -ENXIO and the
+	 * driver bails. SOC_PERIPHERAL_IRQ(0) corresponds to PLIC
+	 * input 16, the tempsen line per vendor cv181x_riscv DT. */
+	soc_temp: thermal-sensor@30e0000 {
+		compatible = "sophgo,cv1800-thermal";
+		reg = <0x030e0000 0x100>;
+		clocks = <&clk CLK_TEMPSEN>;
+		interrupts = <SOC_PERIPHERAL_IRQ(0) IRQ_TYPE_LEVEL_HIGH>;
+		#thermal-sensor-cells = <0>;
+		status = "okay";
+	};
+};
+
+/* Auxiliary SAR-ADC at 0x030F0000. Upstream cv180x.dtsi already
+ * declares it disabled with three channels @0..2 — only PIN_ADC1
+ * is broken out as a dedicated analog pad on the SG2002 pin set
+ * (channels 0 and 2 land on internal nets), but enabling all
+ * three is harmless and lets the channels appear under
+ * /sys/bus/iio/devices/iio:device0. The iio-hwmon shim below
+ * also re-exposes them as in1_input..in3_input under
+ * /sys/class/hwmon/hwmonN/ so `sensors` and friends pick them up. */
+&saradc {
+	/* `#io-channel-cells` is missing from the upstream saradc node
+	 * — add it here so iio-hwmon (and any other iio-consumer) can
+	 * reference channels via `io-channels = <&saradc N>`. The
+	 * sophgo,cv1800b-saradc binding YAML doesn't list it, so this
+	 * is also worth upstreaming once we get around to it. */
+	#io-channel-cells = <1>;
+	status = "okay";
+};
+
+/ {
+	/* Generic IIO→hwmon bridge. Names the three SAR-ADC channels
+	 * as voltage inputs; the shim handles raw→millivolt conversion
+	 * using the IIO scale (~0.806 mV/LSB for 12-bit / 3.3 V). */
+	saradc_hwmon: iio-hwmon {
+		compatible = "iio-hwmon";
+		io-channels = <&saradc 0>, <&saradc 1>, <&saradc 2>;
+	};
+};
+
+/* I2C0 on the dedicated IIC0 pair (the only I2C with bonded-out
+ * pads on the SG2002). After enable, /dev/i2c-0 is available for
+ * userspace tools (i2cdetect / i2cget / i2cset). The four other
+ * I2C controllers in the IP exist in silicon but the SG2002 pad
+ * mux doesn't expose them, so they stay disabled. */
+&i2c0 {
+	pinctrl-0 = <&i2c0_cfg>;
+	pinctrl-names = "default";
+	clock-frequency = <100000>;
+	status = "okay";
+};
+
+/* PWM IP — four instances at 0x03060000..0x03063000, each with 4
+ * channels (16 channels total exposed as /sys/class/pwm/pwmchip0..3).
+ * Driver in patches/0008 (sophgo,cv1800-pwm). Pinctrl on the SG2002
+ * pad set is sparse for PWM — only PIN_PWM0_BUCK is dedicated;
+ * other channels reach external pads only via re-muxing UART/etc
+ * pads, which is board-specific. Enabled at the IP level here so
+ * /sys/class/pwm exists; pad routing is left for the operator
+ * (devmem the relevant pinmux register, or add a pinctrl group). */
+&{/soc} {
+	pwm0: pwm@3060000 {
+		compatible = "sophgo,cv1800-pwm";
+		reg = <0x03060000 0x1000>;
+		clocks = <&clk CLK_PWM>;
+		#pwm-cells = <3>;
+		status = "okay";
+	};
+	pwm1: pwm@3061000 {
+		compatible = "sophgo,cv1800-pwm";
+		reg = <0x03061000 0x1000>;
+		clocks = <&clk CLK_PWM>;
+		#pwm-cells = <3>;
+		status = "okay";
+	};
+	pwm2: pwm@3062000 {
+		compatible = "sophgo,cv1800-pwm";
+		reg = <0x03062000 0x1000>;
+		clocks = <&clk CLK_PWM>;
+		#pwm-cells = <3>;
+		status = "okay";
+	};
+	pwm3: pwm@3063000 {
+		compatible = "sophgo,cv1800-pwm";
+		reg = <0x03063000 0x1000>;
+		clocks = <&clk CLK_PWM>;
+		#pwm-cells = <3>;
+		status = "okay";
+	};
+};
+
+&{/soc} {
+	/* Audio data path on the cv1800b/SG2002 — verified against
+	 * vendor build/boards/default/dts/sg200x/soph_base.dtsi:
+	 *
+	 *   I2S0 (0x04100000)  rx-only  → wired to internal RXADC
+	 *                                 (capability="rx")
+	 *   I2S1, I2S2                  → generic external I2S
+	 *                                 (NOT connected to internal codec)
+	 *   I2S3 (0x04130000)  tx-only  → wired to internal TXDAC
+	 *                                 (capability="tx", mclk_out="true"
+	 *                                  feeds MCLK to BOTH ADC and DAC)
+	 *
+	 * The mainline `sophgo,cv1800b-i2s.yaml` example shows I2S1 — that's
+	 * an arbitrary external-codec example, NOT the internal-codec path.
+	 * Wiring the internal ADC to I2S1 produced full DMA buffers of zero
+	 * (I2S1 isn't physically connected to the on-die codec; the FIFO
+	 * read returned whatever was on the unconnected external pins).
+	 *
+	 * For mainline 7.0 capture to work on this board we must:
+	 *   - ADC dai-link goes through I2S0 (rx)
+	 *   - DAC dai-link goes through I2S3 (tx) AND drives MCLK out
+	 */
+	i2s0: i2s@4100000 {
+		compatible = "sophgo,cv1800b-i2s";
+		reg = <0x04100000 0x10000>;
+		clocks = <&clk CLK_APB_I2S0>, <&clk CLK_SDMA_AUD0>;
+		clock-names = "i2s", "mclk";
+		dmas = <&dmamux 0 1>;
+		dma-names = "rx";
+		#sound-dai-cells = <0>;
+		status = "okay";
+	};
+
+	i2s3: i2s@4130000 {
+		compatible = "sophgo,cv1800b-i2s";
+		reg = <0x04130000 0x10000>;
+		clocks = <&clk CLK_APB_I2S3>, <&clk CLK_SDMA_AUD3>;
+		clock-names = "i2s", "mclk";
+		dmas = <&dmamux 7 1>;
+		dma-names = "tx";
+		#sound-dai-cells = <0>;
+		status = "okay";
+	};
+
+	audio_dac: audio-codec@300a000 {
+		compatible = "sophgo,cv1800b-sound-dac";
+		reg = <0x0300a000 0x100>;
+		#sound-dai-cells = <0>;
+		status = "okay";
+	};
+
+	audio_adc: audio-codec@300a100 {
+		compatible = "sophgo,cv1800b-sound-adc";
+		reg = <0x0300a100 0x100>;
+		#sound-dai-cells = <0>;
+		status = "okay";
+	};
+};
+
+/ {
+	/* Thermal zone bound to the on-die tempsen above. Driver
+	 * requires devm_thermal_of_zone_register() to find a zone
+	 * referencing the sensor; without this it returns -ENODEV.
+	 * Critical at 125 °C — vendor cv181x DT uses 130 °C, but the
+	 * silicon datasheet absolute-max is 125 °C and we'd rather
+	 * orderly_poweroff before the SoC actually goes pop. The
+	 * 1 s polling delay is borrowed from vendor; the cv1800
+	 * driver also fires the zone via threshold IRQ when trips
+	 * are crossed, so polling is just a fallback. */
+	thermal-zones {
+		soc-thermal {
+			polling-delay = <1000>;
+			polling-delay-passive = <1000>;
+			thermal-sensors = <&soc_temp>;
+
+			trips {
+				soc_crit: soc-crit {
+					temperature = <125000>; /* mC */
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+	};
+
+	sound {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "sg2002-onboard";
+		simple-audio-card,format = "i2s";
+		/* The cv1800b internal ADC needs mclk_rate set before
+		 * hw_params can compute its BCLK divider. Without
+		 * mclk-fs, simple-card never calls set_sysclk on the
+		 * codec → adc_setbclk_div errors with "could not set
+		 * rate, check DT node for fixed clock". 256 → mclk =
+		 * 256 * rate; at 48 kHz that's 12.288 MHz, divided
+		 * down from the 221.184 MHz I2S sysclk by mclk_div=18. */
+		simple-audio-card,mclk-fs = <256>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		/* DAC dai-link uses I2S3 (TX path to internal TXDAC).
+		 * `system-clock-direction-out` on the I2S3 cpu node tells
+		 * cv1800b_i2s_dai_set_sysclk to also enable CLK_MCLK_OUT_EN
+		 * — the internal RXADC takes its MCLK from I2S3, so this
+		 * has to be on for capture to work even though the ADC
+		 * link uses a different I2S (I2S0). The DAC link runs
+		 * first when both are open simultaneously; for capture-
+		 * only flows the ADC link's startup also opens the DAC
+		 * link in simple-card so MCLK is gated up either way.
+		 *
+		 * The cv1800b-i2s driver only accepts CBP_CFP (codec
+		 * provider) or CBC_CFC (cpu provider). With no master
+		 * phandles, simple-card picks CBC_CFC — I2S generates
+		 * BCLK/FCLK and the on-die codec follows. */
+		simple-audio-card,dai-link@0 {
+			reg = <0>;
+			format = "i2s";
+			/* I2S3 = TX-only, internal-DAC data path AND the
+			 * MCLK source the on-die ADC also uses. Mark its
+			 * cpu node clock-direction-out so the i2s driver
+			 * sets CLK_MCLK_OUT_EN.
+			 *
+			 * `system-clock-frequency = <12288000>` short-
+			 * circuits simple_util_parse_clk's last-resort
+			 * fallback, which otherwise reads the first clock
+			 * from the i2s node (CLK_APB_I2S3 @ 300 MHz from
+			 * the AXI4 bus) and uses *that* as simple_dai->
+			 * sysclk. simple-card's init_dai then calls
+			 * set_sysclk(300M) at probe time, which leaves
+			 * CLK_SDMA_AUD0/3 (the actual mclk) in a bypass-
+			 * pinned state from which the runtime
+			 * set_sysclk(12.288M) returns -EINVAL. Pinning
+			 * sysclk to mclk-fs × 48000 here keeps
+			 * everything consistent. Side-effect: locks the
+			 * card to 48 kHz; revisit if we need other rates. */
+			cpu {
+				sound-dai = <&i2s3>;
+				system-clock-direction-out;
+				system-clock-frequency = <12288000>;
+			};
+			codec { sound-dai = <&audio_dac>; };
+		};
+
+		simple-audio-card,dai-link@1 {
+			reg = <1>;
+			format = "i2s";
+			/* I2S0 = RX-only, internal-ADC data path. MCLK
+			 * comes from I2S3 (above). Same parse_clk fallback
+			 * trap as link@0; pin sysclk to 12.288 MHz. */
+			cpu {
+				sound-dai = <&i2s0>;
+				system-clock-frequency = <12288000>;
+			};
+			codec { sound-dai = <&audio_adc>; };
+		};
+	};
+};

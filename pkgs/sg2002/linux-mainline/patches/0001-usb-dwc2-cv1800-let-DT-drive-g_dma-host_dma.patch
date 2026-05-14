@@ -1,0 +1,38 @@
+From 13773dc1453aa5756d59e1442af9cf93cfa11828 Mon Sep 17 00:00:00 2001
+From: George Watson <george@hellas.ai>
+Date: Fri, 24 Apr 2026 12:50:21 +0200
+Subject: [PATCH 1/2] usb: dwc2: cv1800: let DT drive g_dma/host_dma
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Upstream dwc2's CV1800 match callback hard-codes DMA off, which forces
+slave/PIO mode and the gadget TX path wedges after a handful of packets.
+The vendor 5.10 kernel enables DMA (via g-use-dma DT prop + g_dma = 1 in
+its own cv182x callback).
+
+Drop the two '= false' assignments so the DT's g-use-dma property drives
+g_dma/host_dma — this matches how other dwc2 platforms (rockchip, etc.)
+operate, and lets per-board DT decide whether DMA is usable.
+
+Signed-off-by: George Watson <george@hellas.ai>
+---
+ drivers/usb/dwc2/params.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/drivers/usb/dwc2/params.c b/drivers/usb/dwc2/params.c
+index 091bfcfef..94ce6f738 100644
+--- a/drivers/usb/dwc2/params.c
++++ b/drivers/usb/dwc2/params.c
+@@ -224,8 +224,6 @@ static void dwc2_set_cv1800_params(struct dwc2_hsotg *hsotg)
+ 
+ 	p->otg_caps.hnp_support = false;
+ 	p->otg_caps.srp_support = false;
+-	p->host_dma = false;
+-	p->g_dma = false;
+ 	p->speed = DWC2_SPEED_PARAM_HIGH;
+ 	p->phy_type = DWC2_PHY_TYPE_PARAM_UTMI;
+ 	p->phy_utmi_width = 16;
+-- 
+2.53.0
+
