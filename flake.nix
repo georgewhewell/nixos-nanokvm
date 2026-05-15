@@ -33,8 +33,13 @@
       flake = false;
     };
 
+    # Sipeed's NanoKVM userspace. Pinned to the release commit so the
+    # flake evaluates from anywhere — used to be a `git+file:` to a
+    # local checkout which only resolved on the dev host. The commit
+    # message says "release: nanokvm@2.4.1" but there's no matching
+    # tag upstream, hence pinning by SHA.
     nanokvm-src = {
-      url = "git+file:///home/grw/src/NanoKVM";
+      url = "github:sipeed/NanoKVM/2ca5b19efe64266b5bcde7ef167b6961659154d6";
       flake = false;
     };
   };

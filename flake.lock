@@ -57,15 +57,16 @@
       "locked": {
         "lastModified": 1778235418,
         "narHash": "sha256-/iYjAgVZIR/UOVXOF5bgkYwJs6VQnYyL0LQfnpK6xLM=",
-        "ref": "refs/heads/main",
+        "owner": "sipeed",
+        "repo": "NanoKVM",
         "rev": "2ca5b19efe64266b5bcde7ef167b6961659154d6",
-        "revCount": 626,
-        "type": "git",
-        "url": "file:///home/grw/src/NanoKVM"
+        "type": "github"
       },
       "original": {
-        "type": "git",
-        "url": "file:///home/grw/src/NanoKVM"
+        "owner": "sipeed",
+        "repo": "NanoKVM",
+        "rev": "2ca5b19efe64266b5bcde7ef167b6961659154d6",
+        "type": "github"
       }
     },
     "nixpkgs": {
