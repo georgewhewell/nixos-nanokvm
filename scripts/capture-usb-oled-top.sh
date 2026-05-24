@@ -57,6 +57,8 @@ tail_log() {
       case "$line" in
         *"SSH is up:"* | \
         *"NanoKVM web app target:"* | \
+        *"SSH did not answer yet; keeping NBD server running for inspection"* | \
+        *"leave this process running; Ctrl-C stops the NBD backing store"* | \
         *"not attaching to target shell; rootfs NBD is running"* | \
         *"shell detached; rootfs NBD is still running"* | \
         *"failed to start target kexec agent"* | \
