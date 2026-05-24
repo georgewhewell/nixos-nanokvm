@@ -109,7 +109,7 @@ let
     fi
 
     echo "debug-nbd: connecting /dev/nbd0 to $host_ip:$nbd_port"
-    "$nbd_client" -R -n -p --systemd-mark "$host_ip" "$nbd_port" /dev/nbd0 &
+    "$nbd_client" -R -n -p --systemd-mark -N rootfs "$host_ip" "$nbd_port" /dev/nbd0 &
     client=$!
     echo "$client" > "$pid_file"
 

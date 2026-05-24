@@ -191,14 +191,17 @@ let
       rootfsService = preInject:
         lib.optionalString (rootfs != null) ''
           start_rootfs_nbd() {
+            local rootfs_nbd_config rootfs_nbd_log
             free_tcp_listener usb-kexec "$nanokvm_port_nbd_rootfs" || return 1
             echo "[usb-kexec] serving rootfs ${rootfs} on $rootfs_endpoint"
-            ( exec nbd-server "$rootfs_endpoint" ${rootfs} -r -d \
-                2>&1 | sed -u 's/^/[nbd-rootfs] /' ) &
+            rootfs_nbd_config="$(write_nbd_config erofs-rootfs "$rootfs_bind" "$nanokvm_port_nbd_rootfs" rootfs ${rootfs})"
+            rootfs_nbd_log="$(mktemp -t nanokvm-rootfs-nbd-XXXXXX.log)"
+            nbd-server -C "$rootfs_nbd_config" -d >"$rootfs_nbd_log" 2>&1 &
             rootfs_nbd_pid=$!
             sleep 0.5
             if ! kill -0 "$rootfs_nbd_pid" 2>/dev/null; then
               echo "[usb-kexec] rootfs nbd-server exited early" >&2
+              sed -u 's/^/[nbd-rootfs] /' "$rootfs_nbd_log" >&2 || true
               wait "$rootfs_nbd_pid" || true
               return 1
             fi
@@ -287,12 +290,14 @@ let
 
         ${rootfsService false}
 
+        payload_nbd_log="$(mktemp -t nanokvm-payload-nbd-XXXXXX.log)"
         echo "[usb-kexec] serving kexec payload ${payload} on $nanokvm_host_ip:$nanokvm_port_nbd_payload"
-        nbd-server "$nanokvm_host_ip:$nanokvm_port_nbd_payload" ${payload} -r -n &
+        nbd-server "$nanokvm_host_ip:$nanokvm_port_nbd_payload" ${payload} -r -n >"$payload_nbd_log" 2>&1 &
         payload_nbd_pid=$!
         sleep 0.5
         if ! kill -0 "$payload_nbd_pid" 2>/dev/null; then
           echo "[usb-kexec] payload nbd-server exited early" >&2
+          sed -u 's/^/[nbd-payload] /' "$payload_nbd_log" >&2 || true
           wait "$payload_nbd_pid"
         fi
 
@@ -325,7 +330,7 @@ let
     let
       rootfsService = lib.optionalString (rootfs != null) ''
         start_rootfs_nbd() {
-          local attempt max_attempts
+          local attempt max_attempts rootfs_nbd_config rootfs_nbd_log
 
           cleanup_nanokvm_rootfs_nbd usb-boot || true
           case "$rootfs_port_request" in
@@ -347,7 +352,9 @@ let
               echo "[usb-boot] serving ${rootfs} on $rootfs_endpoint (attempt $attempt/$max_attempts)"
             fi
 
-            nbd-server "$rootfs_endpoint" ${rootfs} -r -d &
+            rootfs_nbd_config="$(write_nbd_config erofs-rootfs "$rootfs_bind" "$rootfs_port" rootfs ${rootfs})"
+            rootfs_nbd_log="$(mktemp -t nanokvm-rootfs-nbd-XXXXXX.log)"
+            nbd-server -C "$rootfs_nbd_config" -d >"$rootfs_nbd_log" 2>&1 &
             nbd_pid=$!
             sleep 0.5
             if kill -0 "$nbd_pid" 2>/dev/null; then
@@ -356,6 +363,7 @@ let
             fi
 
             echo "[usb-boot] nbd-server exited early on $rootfs_endpoint" >&2
+            sed -u 's/^/[nbd-rootfs] /' "$rootfs_nbd_log" >&2 || true
             wait "$nbd_pid" 2>/dev/null || true
             nbd_pid=
             [ "$max_attempts" != 1 ] || return 1

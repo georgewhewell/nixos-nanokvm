@@ -122,11 +122,15 @@ repo_root() {
 print_runner_command() {
   if [ -n "${NANOKVM_USB_OLED_TOP:-}" ]; then
     printf '$ %q' "$NANOKVM_USB_OLED_TOP"
-    printf ' %q' "$@"
+    for arg in "$@"; do
+      printf ' %q' "$arg"
+    done
     printf '\n'
   else
     printf '$ nix run .#usb-oled-top --'
-    printf ' %q' "$@"
+    for arg in "$@"; do
+      printf ' %q' "$arg"
+    done
     printf '\n'
   fi
 }

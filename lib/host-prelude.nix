@@ -213,7 +213,7 @@ protocol: ''
       pid="''${cmdline%/cmdline}"
       pid="''${pid##*/}"
       [ "$pid" != "$$" ] || continue
-      cmd="$(tr '\0' ' ' < "$cmdline" 2>/dev/null || true)"
+      cmd="$({ tr '\0' ' ' < "$cmdline"; } 2>/dev/null || true)"
       case "$cmd" in
         *nbd-server*nanokvm-erofs-rootfs*)
           printf '%s\n' "$pid"
@@ -276,6 +276,23 @@ protocol: ''
     else
       printf '%s\n' "$port"
     fi
+  }
+
+  write_nbd_config() {
+    local label="$1" bind_addr="$2" port="$3" export_name="$4" export_path="$5" cfg
+    cfg="$(mktemp -t "nanokvm-$label-nbd-XXXXXX.conf")"
+    {
+      printf '%s\n' '[generic]'
+      if [ -n "$bind_addr" ]; then
+        printf '  listenaddr = %s\n' "$bind_addr"
+      fi
+      printf '  port = %s\n' "$port"
+      printf '\n'
+      printf '[%s]\n' "$export_name"
+      printf '  exportname = %s\n' "$export_path"
+      printf '%s\n' '  readonly = true'
+    } > "$cfg"
+    printf '%s\n' "$cfg"
   }
 
   configure_host_iface() {
@@ -356,7 +373,7 @@ protocol: ''
     # Retry only if the connection itself failed. Once we get any
     # response, it's authoritative — `^OK ` means the agent
     # accepted the request, anything else is a real error.
-    local request="$1" response rc
+    local request="$1" response rc last_rc=
     local attempts="''${2:-120}"
     for _ in $(seq 1 "$attempts"); do
       set +e
@@ -369,11 +386,15 @@ protocol: ''
         return $?
       fi
       if [ "$rc" -ne 0 ]; then
-        echo "nc exited $rc while contacting $nanokvm_target_ip:$nanokvm_port_kexec" >&2
+        last_rc="$rc"
       fi
       sleep 0.25
     done
-    echo "no response from kexec control on $nanokvm_target_ip:$nanokvm_port_kexec after $attempts attempts" >&2
+    if [ -n "$last_rc" ]; then
+      echo "no response from kexec control on $nanokvm_target_ip:$nanokvm_port_kexec after $attempts attempts (last nc exit $last_rc)" >&2
+    else
+      echo "no response from kexec control on $nanokvm_target_ip:$nanokvm_port_kexec after $attempts attempts" >&2
+    fi
     return 1
   }
 ''

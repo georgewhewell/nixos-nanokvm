@@ -197,7 +197,7 @@ let
     # used: with the kernel patch we don't need kernel-side
     # reconnect, and `-p` interacts badly with NBD_DO_IT cleanup
     # on this kernel (Device or resource busy storm).
-    ( trap "" TERM HUP; exec nbd-client -n --systemd-mark "$nanokvm_host_ip" "$nanokvm_port_nbd_rootfs" ${nbdDevice} ) &
+    ( trap "" TERM HUP; exec nbd-client -n --systemd-mark -N rootfs "$nanokvm_host_ip" "$nanokvm_port_nbd_rootfs" ${nbdDevice} ) &
     client=$!
     echo "$client" > "$pid_file"
 
