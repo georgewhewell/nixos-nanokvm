@@ -28,63 +28,66 @@
 # Anything not listed here is intentionally absent — vendor variant
 # transports, vendor.kexec runners, etc. — those don't work, so they
 # don't exist.
-{lib}: [
-  # ===== licheerv-nano-w / mainline =====
-  {
-    path = ["licheerv" "mainline" "kernel-test"];
-    boardName = "licheerv-nano-w";
-    kernel = "mainline";
-    profile = "usb-kernel-test";
-    artifact = "kernel-test";
-    tag = "kernel-test-mainline";
-  }
-  {
-    path = ["licheerv" "mainline" "debug"];
-    boardName = "licheerv-nano-w";
-    kernel = "mainline";
-    profile = "usb-debug";
-    artifact = "debug";
-    tag = "debug-mainline";
-    liveCfgPath = ["licheerv" "mainline" "live" "usb"];
-  }
-  {
-    path = ["licheerv" "mainline" "live" "usb"];
-    boardName = "licheerv-nano-w";
-    kernel = "mainline";
-    profile = "usb-nbd-live";
-    artifact = "live";
-    tag = "live-mainline";
-  }
-  {
-    path = ["licheerv" "mainline" "live" "usb-rndis"];
-    boardName = "licheerv-nano-w";
-    kernel = "mainline";
-    profile = "usb-nbd-live";
-    modules = [({...}: {sg2002.usbGadget.network.transport = "rndis";})];
-    artifact = "live";
-    tag = "live-mainline-rndis";
-  }
-  {
-    path = ["licheerv" "mainline" "live" "usb-ncm"];
-    boardName = "licheerv-nano-w";
-    kernel = "mainline";
-    profile = "usb-nbd-live";
-    modules = [({...}: {sg2002.usbGadget.network.transport = "ncm";})];
-    artifact = "live";
-    tag = "live-mainline-ncm";
-  }
-  {
-    path = ["licheerv" "mainline" "live" "usb-g-multi"];
-    boardName = "licheerv-nano-w";
-    kernel = "mainline";
-    profile = "usb-nbd-live";
+{ lib }:
+let
+  lichee =
+    kernel: pathTail: attrs:
+    {
+      path = [ "licheerv" kernel ] ++ pathTail;
+      boardName = "licheerv-nano-w";
+      inherit kernel;
+    }
+    // attrs;
+
+  licheeProfile =
+    kernel: pathTail: profile: artifact: tag: attrs:
+    lichee kernel pathTail (
+      {
+        inherit profile artifact tag;
+      }
+      // attrs
+    );
+
+  kernelTest = kernel:
+    licheeProfile
+      kernel
+      [ "kernel-test" ]
+      "usb-kernel-test"
+      "kernel-test"
+      "kernel-test-${kernel}"
+      { };
+
+  debug = kernel:
+    licheeProfile
+      kernel
+      [ "debug" ]
+      "usb-debug"
+      "debug"
+      "debug-${kernel}"
+      {
+        liveCfgPath = [ "licheerv" kernel "live" "usb" ];
+      };
+
+  live =
+    kernel: leaf: tag: attrs:
+    licheeProfile
+      kernel
+      [ "live" leaf ]
+      "usb-nbd-live"
+      "live"
+      tag
+      attrs;
+
+  usbTransport = transport: {
+    modules = [ ({ ... }: { sg2002.usbGadget.network.transport = transport; }) ];
+  };
+
+  gMulti = {
     modules = [
-      ({lib, ...}: {
+      ({ lib, ... }: {
         boot.initrd.systemd.services.usb-gadget.enable = lib.mkForce false;
       })
     ];
-    artifact = "live";
-    tag = "live-mainline-g-multi";
     artifactArgs.extraBootargs = [
       "g_multi.use_rndis=1"
       # MACs match sg2002-usb-gadget-initrd.nix → protocol.nix.
@@ -95,30 +98,22 @@
       "g_multi.iProduct=LicheeRV-Nano-NixOS"
       "g_multi.iSerialNumber=sg2002-g-multi"
     ];
-  }
-  {
-    path = ["licheerv" "mainline" "live" "usb-oled"];
-    boardName = "licheerv-nano-w";
-    kernel = "mainline";
-    profile = "usb-nbd-live";
-    mixins = [../modules/oled.nix];
-    modules = [({...}: {nanokvm.oled.enable = true;})];
-    artifact = "live";
-    tag = "live-mainline-oled";
+  };
+
+  oled = {
+    mixins = [ ../modules/oled.nix ];
+    modules = [ ({ ... }: { nanokvm.oled.enable = true; }) ];
     artifactArgs.oled = true;
-  }
-  {
-    path = ["licheerv" "mainline" "live" "wifi"];
-    boardName = "licheerv-nano-w";
-    kernel = "mainline";
-    profile = "usb-nbd-live";
+  };
+
+  wifi = {
     variant = "wifi";
     mixins = [
       ../modules/sg2002-initrd-wifi.nix
       ../modules/wifi-aic8800.nix
     ];
     modules = [
-      ({...}: {
+      ({ ... }: {
         # In wifi mode the rootfs NBD lives on the LAN — networkd
         # brings wlan0 up via DHCP and connects to the host's LAN
         # address. USB-ECM stays up purely for the control plane.
@@ -130,46 +125,36 @@
         };
       })
     ];
-    artifact = "live";
-    # Historical kink: tag is "live-wifi-<kernel>" not "live-<kernel>-wifi".
-    # Kept stable so kexec_target diagnostics don't change.
-    tag = "live-wifi-mainline";
     artifactArgs.rootfsBindIp = "192.168.23.136";
-  }
+  };
 
-  # ===== licheerv-nano-w / vendor =====
-  {
-    path = ["licheerv" "vendor" "kernel-test"];
-    boardName = "licheerv-nano-w";
-    kernel = "vendor";
-    profile = "usb-kernel-test";
-    artifact = "kernel-test";
-    tag = "kernel-test-vendor";
-  }
-  {
-    path = ["licheerv" "vendor" "debug"];
-    boardName = "licheerv-nano-w";
-    kernel = "vendor";
-    profile = "usb-debug";
-    artifact = "debug";
-    tag = "debug-vendor";
-    liveCfgPath = ["licheerv" "vendor" "live" "usb"];
-  }
-  {
-    path = ["licheerv" "vendor" "live" "usb"];
-    boardName = "licheerv-nano-w";
-    kernel = "vendor";
-    profile = "usb-nbd-live";
-    artifact = "live";
-    tag = "live-vendor";
+  vendorUsb = {
     # Vendor 5.10 lacks kexec-tools/nbd-client + our nbd patch — drop
     # the kexec runner from the output set. usb-boot still publishes.
     artifactArgs.includeKexec = false;
-  }
+  };
+in
+[
+  # ===== licheerv-nano-w / mainline =====
+  (kernelTest "mainline")
+  (debug "mainline")
+  (live "mainline" "usb" "live-mainline" { })
+  (live "mainline" "usb-rndis" "live-mainline-rndis" (usbTransport "rndis"))
+  (live "mainline" "usb-ncm" "live-mainline-ncm" (usbTransport "ncm"))
+  (live "mainline" "usb-g-multi" "live-mainline-g-multi" gMulti)
+  (live "mainline" "usb-oled" "live-mainline-oled" oled)
+  # Historical kink: tag is "live-wifi-<kernel>" not "live-<kernel>-wifi".
+  # Kept stable so kexec_target diagnostics don't change.
+  (live "mainline" "wifi" "live-wifi-mainline" wifi)
+
+  # ===== licheerv-nano-w / vendor =====
+  (kernelTest "vendor")
+  (debug "vendor")
+  (live "vendor" "usb" "live-vendor" vendorUsb)
 
   # ===== nanokvm-pcie / vendor (production SD image) =====
   {
-    path = ["pcie" "vendor" "sd"];
+    path = [ "pcie" "vendor" "sd" ];
     boardName = "nanokvm-pcie";
     kernel = "vendor";
     profile = "sd-image";

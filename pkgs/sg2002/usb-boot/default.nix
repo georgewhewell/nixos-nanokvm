@@ -6,24 +6,25 @@
 #                        U-Boot's fastboot gadget (18d1:d00d), stage a
 #                        FIT via `fastboot stage` + `fastboot oem run`.
 #                        Requires mainline FIP + android-tools.
-{
-  python3,
-  writeShellApplication,
-  symlinkJoin,
-  android-tools,
-  sg2002-cv181x-usb-dl,
-  sg2002-fip,
-  sg2002-fip-mainline-uboot,
-}: let
-  pythonEnv = python3.withPackages (ps: [ps.pyserial ps.pyusb]);
+{ python3
+, writeShellApplication
+, symlinkJoin
+, android-tools
+, sg2002-cv181x-usb-dl
+, sg2002-fip
+, sg2002-fip-mainline-uboot
+,
+}:
+let
+  pythonEnv = python3.withPackages (ps: [ ps.pyserial ps.pyusb ]);
 
   # Path to the upstream cv181x-rom-dl's lib dir — contains the
   # `cv_usb_util` package + `cv_dl_magic.bin`.
   cvUsbLib = "${sg2002-cv181x-usb-dl}/lib/cv181x-usb-dl/rom_usb_dl";
 
   # fast-rom-dl used to live here as a libusb-only replacement for
-  # the FIP-push phase. Dropped (PLAN.md → P10) because it only
-  # handled the 1st-stage push (magic + first 4 KB + BREAK); the
+  # the FIP-push phase. Dropped because it only handled the 1st-stage
+  # push (magic + first 4 KB + BREAK); the
   # vendor FSBL we still link against needs a 2nd-stage cvi_utask
   # transfer to receive the rest of FIP. Without a libusb impl of
   # 2nd-stage it was an incomplete shortcut that just clutters the
@@ -45,7 +46,7 @@
 
   usb-boot-mainline = writeShellApplication {
     name = "usb-boot-mainline";
-    runtimeInputs = [android-tools];
+    runtimeInputs = [ android-tools ];
     text = ''
       exec ${pythonEnv}/bin/python3 ${./usb_boot_mainline.py} \
         --rom-dl ${sg2002-cv181x-usb-dl}/bin/cv181x-rom-dl \
@@ -54,7 +55,7 @@
     '';
   };
 in
-  symlinkJoin {
-    name = "sg2002-usb-boot";
-    paths = [usb-boot-vendor usb-boot-mainline];
-  }
+symlinkJoin {
+  name = "sg2002-usb-boot";
+  paths = [ usb-boot-vendor usb-boot-mainline ];
+}

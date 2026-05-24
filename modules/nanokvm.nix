@@ -1,16 +1,16 @@
-{
-  config,
-  lib,
-  pkgs,
-  ...
-}: let
+{ config
+, lib
+, pkgs
+, ...
+}:
+let
   cfg = config.services.nanokvm;
   compatUnit = "nanokvm-compat.service";
-  yaml = pkgs.formats.yaml {};
+  yaml = pkgs.formats.yaml { };
   kmodsUnit = "nanokvm-kmods.service";
   usbGadgetUnit = "nanokvm-usb-gadget.service";
   serverDependencyUnits =
-    [compatUnit]
+    [ compatUnit ]
     ++ lib.optional cfg.kmods.enable kmodsUnit
     ++ lib.optional cfg.usbGadget.enable usbGadgetUnit;
 
@@ -137,7 +137,8 @@
     cp ${initRestartScript} /etc/init.d/S95nanokvm
     chmod 0755 /etc/init.d/S95nanokvm
   '';
-in {
+in
+{
   options.services.nanokvm = with lib; {
     enable = mkEnableOption "Sipeed NanoKVM server";
 
@@ -161,19 +162,19 @@ in {
     };
 
     authentication = mkOption {
-      type = types.enum ["enable" "disable"];
+      type = types.enum [ "enable" "disable" ];
       default = "enable";
       description = "NanoKVM application authentication setting.";
     };
 
     logLevel = mkOption {
-      type = types.enum ["debug" "info" "warn" "error"];
+      type = types.enum [ "debug" "info" "warn" "error" ];
       default = "info";
       description = "NanoKVM server log level.";
     };
 
     hardwareVersion = mkOption {
-      type = types.enum ["alpha" "beta" "pcie"];
+      type = types.enum [ "alpha" "beta" "pcie" ];
       default = "pcie";
       description = "Value written to /etc/kvm/hw.";
     };
@@ -228,14 +229,14 @@ in {
         Kept as an option (and honored verbatim when the firewall is
         on) so an opt-in firewall path remains discoverable; the real
         fix is to flip the platform default and audit every listener
-        for explicit allow rules. Tracked in PLAN.md as t7.
+        for explicit allow rules.
       '';
     };
   };
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
     {
-      boot.kernelModules = lib.mkIf cfg.usbGadget.enable ["libcomposite"];
+      boot.kernelModules = lib.mkIf cfg.usbGadget.enable [ "libcomposite" ];
 
       environment.systemPackages = [
         cfg.package
@@ -267,9 +268,9 @@ in {
 
       systemd.services.nanokvm-compat = {
         description = "NanoKVM compatibility files";
-        wantedBy = ["multi-user.target"];
-        before = ["nanokvm-server.service"] ++ lib.optional cfg.usbGadget.enable usbGadgetUnit;
-        after = ["systemd-tmpfiles-setup.service"];
+        wantedBy = [ "multi-user.target" ];
+        before = [ "nanokvm-server.service" ] ++ lib.optional cfg.usbGadget.enable usbGadgetUnit;
+        after = [ "systemd-tmpfiles-setup.service" ];
 
         path = with pkgs; [
           coreutils
@@ -285,11 +286,11 @@ in {
 
       systemd.services.nanokvm-kmods = lib.mkIf cfg.kmods.enable {
         description = "NanoKVM Sophgo multimedia kernel modules";
-        wantedBy = ["multi-user.target"];
+        wantedBy = [ "multi-user.target" ];
         before = [
           "nanokvm-server.service"
         ] ++ lib.optional cfg.usbGadget.enable usbGadgetUnit;
-        after = ["systemd-modules-load.service"];
+        after = [ "systemd-modules-load.service" ];
 
         path = with pkgs; [
           bash
@@ -306,8 +307,8 @@ in {
 
       systemd.services.nanokvm-usb-gadget = lib.mkIf cfg.usbGadget.enable {
         description = "NanoKVM USB composite gadget";
-        wantedBy = ["multi-user.target"];
-        before = ["nanokvm-server.service"];
+        wantedBy = [ "multi-user.target" ];
+        before = [ "nanokvm-server.service" ];
         after = [
           compatUnit
           "nanokvm-kmods.service"
@@ -339,9 +340,9 @@ in {
 
       systemd.services.nanokvm-server = {
         description = "NanoKVM web server";
-        wantedBy = ["multi-user.target"];
-        wants = ["network-online.target"];
-        after = ["network-online.target"] ++ serverDependencyUnits;
+        wantedBy = [ "multi-user.target" ];
+        wants = [ "network-online.target" ];
+        after = [ "network-online.target" ] ++ serverDependencyUnits;
         requires = serverDependencyUnits;
 
         path = with pkgs; [

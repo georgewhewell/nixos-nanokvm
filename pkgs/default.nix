@@ -8,10 +8,11 @@
 #   2. `nanokvm-*` — the userspace bits (the Go server, the web
 #      bundle, the erofs rootfs builder, the kexec payload format)
 #      that turn a CV181x board into a working KVM.
-{
-  inputs,
-  nanokvmPatches ? [],
-}: final: prev: let
+{ inputs
+, nanokvmPatches ? [ ]
+,
+}: final: prev:
+let
   inherit (final) lib;
 
   # Cross-compile context. When the overlay is applied to riscv64
@@ -40,10 +41,11 @@
     KEXEC_FILE = yes;
   };
   mainlineConfig =
-    (import ./sg2002/linux-mainline/config.nix {inherit lib;})
+    (import ./sg2002/linux-mainline/config.nix { inherit lib; })
     // mainlineKernelExtras;
   mainlinePatches = (import ./sg2002/linux-mainline/patches.nix).patches;
-in {
+in
+{
   # -----------------------------------------------------------------
   # nixpkgs adjustments
   # -----------------------------------------------------------------
@@ -51,15 +53,16 @@ in {
   kexec-tools =
     if final.stdenv.hostPlatform.system == "riscv64-linux"
     then
-      prev.kexec-tools.overrideAttrs (old: {
-        meta =
-          (old.meta or {})
-          // {
-            # kexec-tools 2.0.32 builds for riscv64; nixpkgs still
-            # carries a stale badPlatforms entry for this target.
-            badPlatforms = lib.remove "riscv64-linux" (old.meta.badPlatforms or []);
-          };
-      })
+      prev.kexec-tools.overrideAttrs
+        (old: {
+          meta =
+            (old.meta or { })
+            // {
+              # kexec-tools 2.0.32 builds for riscv64; nixpkgs still
+              # carries a stale badPlatforms entry for this target.
+              badPlatforms = lib.remove "riscv64-linux" (old.meta.badPlatforms or [ ]);
+            };
+        })
     else prev.kexec-tools;
 
   # vmtouch's Makefile invokes `pod2man` to render the manpage, but the
@@ -68,18 +71,19 @@ in {
   vmtouch =
     if final.stdenv.hostPlatform.system == "riscv64-linux"
     then
-      prev.vmtouch.overrideAttrs (old: {
-        buildPhase = ''
-          runHook preBuild
-          $CC -Wall -O2 -g -std=c99 -o vmtouch vmtouch.c
-          runHook postBuild
-        '';
-        installPhase = ''
-          runHook preInstall
-          install -Dm755 vmtouch "$out/bin/vmtouch"
-          runHook postInstall
-        '';
-      })
+      prev.vmtouch.overrideAttrs
+        (old: {
+          buildPhase = ''
+            runHook preBuild
+            $CC -Wall -O2 -g -std=c99 -o vmtouch vmtouch.c
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            install -Dm755 vmtouch "$out/bin/vmtouch"
+            runHook postInstall
+          '';
+        })
     else prev.vmtouch;
 
   # -----------------------------------------------------------------
@@ -91,16 +95,16 @@ in {
     patches = nanokvmPatches;
   };
 
-  nanokvm-web = final.callPackage ./nanokvm-web {};
-  nanokvm-factory-runtime = final.callPackage ./nanokvm-factory-runtime {};
-  nanokvm-server = final.callPackage ./nanokvm-server {};
+  nanokvm-web = final.callPackage ./nanokvm-web { };
+  nanokvm-factory-runtime = final.callPackage ./nanokvm-factory-runtime { };
+  nanokvm-server = final.callPackage ./nanokvm-server { };
 
   # Build with -tags nocamera so libkvm.so isn't linked in at all —
   # its C++ static constructors SEGV in SAMPLE_COMM_VI_ParseIni when
   # run against a mainline kernel.
-  nanokvm-server-nocamera = final.nanokvm-server.override {noCamera = true;};
+  nanokvm-server-nocamera = final.nanokvm-server.override { noCamera = true; };
 
-  nbd-client-minimal = final.callPackage ./nbd-client-minimal {};
+  nbd-client-minimal = final.callPackage ./nbd-client-minimal { };
 
   nanokvm-erofs-rootfs-for = toplevel:
     final.callPackage ./erofs-rootfs {
@@ -130,7 +134,7 @@ in {
   nanokvm-kexec-payload-erofs = args:
     final.callPackage ./kexec-payload-erofs args;
 
-  sophgo-host-tools = final.callPackage ./sophgo-host-tools {};
+  sophgo-host-tools = final.callPackage ./sophgo-host-tools { };
 
   # -----------------------------------------------------------------
   # sg2002-* (board support, inlined from nixos-sg2002)
@@ -150,17 +154,19 @@ in {
   # a known-good Sipeed SD image. ROM loads fip.bin from FAT partition;
   # we lift it back out with mcopy so we have a working FSBL+DDR blob
   # baseline for the mainline-uboot rebuild below.
-  sg2002-fip = let
-    sipeedImage = final.fetchurl {
-      url = "https://github.com/sipeed/LicheeRV-Nano-Build/releases/download/20251202/2025-12-02-16-54-27b96a.img.xz";
-      hash = "sha256-D9jDObp9/luqVZ/907bt8WkQVMhj4+LsaV/cZA0y/No=";
-    };
-  in
-    final.runCommand "fip-sg2002" {
-      # buildPackages: these run on the build host, not the riscv64
-      # target.
-      nativeBuildInputs = with final.buildPackages; [xz mtools];
-    } ''
+  sg2002-fip =
+    let
+      sipeedImage = final.fetchurl {
+        url = "https://github.com/sipeed/LicheeRV-Nano-Build/releases/download/20251202/2025-12-02-16-54-27b96a.img.xz";
+        hash = "sha256-D9jDObp9/luqVZ/907bt8WkQVMhj4+LsaV/cZA0y/No=";
+      };
+    in
+    final.runCommand "fip-sg2002"
+      {
+        # buildPackages: these run on the build host, not the riscv64
+        # target.
+        nativeBuildInputs = with final.buildPackages; [ xz mtools ];
+      } ''
       mkdir -p $out
       xz -dc ${sipeedImage} | dd bs=1M count=20 iflag=fullblock of=image.bin status=none
       dd if=image.bin of=fat.img bs=512 skip=1 count=32768 status=none
@@ -180,32 +186,35 @@ in {
   # `compressFirmware=false` because aicbsp's rwnx_load_firmware uses
   # filp_open on the literal .bin filename — the .zst suffix nixpkgs
   # would add breaks the driver's open().
-  sg2002-aic8800-firmware = final.runCommand "aic8800-firmware" {
-    passthru.compressFirmware = false;
-  } ''
-    mkdir -p $out/lib/firmware/aic8800_sdio
-    cp -rL ${inputs.aic8800-firmware-src}/* $out/lib/firmware/aic8800_sdio/
-    chmod -R u+w $out/lib/firmware/aic8800_sdio
+  sg2002-aic8800-firmware =
+    final.runCommand "aic8800-firmware"
+      {
+        passthru.compressFirmware = false;
+      } ''
+      mkdir -p $out/lib/firmware/aic8800_sdio
+      cp -rL ${inputs.aic8800-firmware-src}/* $out/lib/firmware/aic8800_sdio/
+      chmod -R u+w $out/lib/firmware/aic8800_sdio
 
-    cd $out/lib/firmware/aic8800_sdio/aic8800DC
-    ln -sfn ../aic8800_and_aic8800D80/fw_adid_u03.bin         fw_adid_u03.bin
-    ln -sfn ../aic8800_and_aic8800D80/fw_patch_u03.bin        fw_patch_u03.bin
-    ln -sfn ../aic8800_and_aic8800D80/fw_patch_table_u03.bin  fw_patch_table_u03.bin
-    ln -sfn ../aic8800_and_aic8800D80/fmacfw.bin              fmacfw.bin
-    ln -sfn ../aic8800_and_aic8800D80/fmacfw_patch.bin        fmacfw_patch.bin
-    ln -sfn aic_userconfig_8800dc.txt                         aic_userconfig.txt
-  '';
+      cd $out/lib/firmware/aic8800_sdio/aic8800DC
+      ln -sfn ../aic8800_and_aic8800D80/fw_adid_u03.bin         fw_adid_u03.bin
+      ln -sfn ../aic8800_and_aic8800D80/fw_patch_u03.bin        fw_patch_u03.bin
+      ln -sfn ../aic8800_and_aic8800D80/fw_patch_table_u03.bin  fw_patch_table_u03.bin
+      ln -sfn ../aic8800_and_aic8800D80/fmacfw.bin              fmacfw.bin
+      ln -sfn ../aic8800_and_aic8800D80/fmacfw_patch.bin        fmacfw_patch.bin
+      ln -sfn aic_userconfig_8800dc.txt                         aic_userconfig.txt
+    '';
 
   # Sophgo CV181x USB download tool (cv181x-dl + cv181x-rom-dl). Used
   # by the USB-recovery boot flow to FSBL-stream FIP+kernel+initrd.
-  sg2002-cv181x-usb-dl = let
-    pythonEnv = final.python3.withPackages (ps: [ps.pyserial ps.pyusb]);
-  in
+  sg2002-cv181x-usb-dl =
+    let
+      pythonEnv = final.python3.withPackages (ps: [ ps.pyserial ps.pyusb ]);
+    in
     final.stdenv.mkDerivation {
       pname = "cv181x-usb-dl";
       version = "0.1.0";
       src = "${inputs.licheerv-nano-build}/build/tools/cv181x/usb_dl";
-      nativeBuildInputs = [final.buildPackages.makeWrapper final.buildPackages.python3];
+      nativeBuildInputs = [ final.buildPackages.makeWrapper final.buildPackages.python3 ];
 
       # Upstream cv181x_rom_usb_download.py drops into an infinite
       # "Connecting to ROM 2nd stage..." loop after pushing the first
@@ -240,7 +249,7 @@ in {
       '';
     };
 
-  sg2002-uboot-mainline = cross.callPackage ./sg2002/uboot-mainline {};
+  sg2002-uboot-mainline = cross.callPackage ./sg2002/uboot-mainline { };
 
   sg2002-kernel-mainline = cross.callPackage ./sg2002/linux-mainline {
     configfile = final.buildPackages.callPackage ./sg2002/linux-mainline/make-config.nix {
@@ -258,7 +267,7 @@ in {
   sg2002-kernel-vendor = prev.callPackage ./sg2002-kernel-vendor-nanokvm {
     baseExtraConfig = ./sg2002/linux-vendor/extra-config.txt;
     licheerv-nano-build = inputs.licheerv-nano-build;
-    kernelPatches = [];
+    kernelPatches = [ ];
     modDirVersion = "5.10.4-tag-";
     kernelExtraConfig = ''
       CONFIG_LOCALVERSION="-tag-"
@@ -277,10 +286,11 @@ in {
   sg2002-dtb-mainline = dtbMainline.dtb;
   sg2002-dtbs-mainline = dtbMainline.dtbs;
   sg2002-dtb-mainline-nowifi = dtbMainline.nowifi;
+  sg2002-dtb-mainline-oled = dtbMainline.oled;
   sg2002-dtb-vendor = dtbVendor.boot;
   sg2002-dtb-vendor-gadget = dtbVendor.gadget;
 
-  sg2002-boot-fit = final.callPackage ./sg2002/boot-fit {};
+  sg2002-boot-fit = final.callPackage ./sg2002/boot-fit { };
 
   sg2002-usb-boot = final.callPackage ./sg2002/usb-boot {
     sg2002-cv181x-usb-dl = final.sg2002-cv181x-usb-dl;

@@ -7,12 +7,11 @@
 # board — `nix run .#boards.licheerv.<kernel>.live.usb` reboots the
 # device, kexecs into this stage 2, and lands you at an SSH login on
 # 10.55.0.1.
-{
-  lib,
-  pkgs,
-  nixpkgs,
-  rootAuthorizedKeys ? [],
-  ...
+{ lib
+, pkgs
+, nixpkgs
+, rootAuthorizedKeys ? [ ]
+, ...
 }: {
   imports = [
     "${nixpkgs}/nixos/modules/profiles/image-based-appliance.nix"
@@ -57,9 +56,21 @@
     };
   };
 
-  users.users.root = {
-    initialPassword = "nixos";
-    openssh.authorizedKeys.keys = rootAuthorizedKeys;
+  users.users = {
+    root = {
+      initialPassword = "nixos";
+      openssh.authorizedKeys.keys = rootAuthorizedKeys;
+    };
+    nixos = {
+      isNormalUser = true;
+      initialPassword = "nixos";
+      extraGroups = [ "wheel" ];
+      openssh.authorizedKeys.keys = rootAuthorizedKeys;
+    };
+  };
+
+  nanokvm.usbControl = {
+    stage2ShellUser = "nixos";
   };
 
   services.nanokvm = {
@@ -76,12 +87,16 @@
     pkgs.writeText "empty-aslr-entropy.conf" ""
   );
 
-  environment.defaultPackages = lib.mkForce [];
+  environment.defaultPackages = lib.mkForce [ ];
   documentation.enable = lib.mkForce false;
   programs.nano.enable = lib.mkForce false;
   programs.less.enable = lib.mkForce false;
 
-  # Benchmarking tools — iperf3 for throughput, fio for NBD read tests.
-  # ~250 KiB total in the closure; cheap.
-  environment.systemPackages = with pkgs; [iperf3 fio];
+  # Interactive diagnostics: btop for a richer TUI, iperf3 for throughput,
+  # fio for NBD read tests.
+  environment.systemPackages = with pkgs; [
+    btop
+    fio
+    iperf3
+  ];
 }

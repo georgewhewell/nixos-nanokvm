@@ -1,6 +1,6 @@
 /* OLED variant overlay — concatenated AFTER sg2002-licheerv-nano-bw.dtsi.
  *
- * Trades the onboard AIC8800DC WiFi for an SSD1306-compatible I²C OLED on
+ * Trades the onboard AIC8800DC WiFi for a 128x128 SH1107 I2C OLED on
  * the 26-pin header. The SG2002 has a single SDIO1 controller and the
  * AIC8800 sits directly on the SD1_* pads; those pads are also where
  * IIC1 is reachable on the LicheeRV Nano header (vendor pinlist:
@@ -12,19 +12,19 @@
  *   GPIOP[18] = SD1_D3 → IIC1_SCL
  *   GPIOP[21] = SD1_D0 → IIC1_SDA
  * Bank GPIOP is 3.3 V on the LicheeRV Nano per the pin-map legend, so
- * an SSD1312 module powered from 3V3 sees clean logic levels with no
+ * an OLED module powered from 3V3 sees clean logic levels with no
  * level-shifter.
  *
- * SSD1312 isn't in mainline ssd1307fb's of_match table — its command set
- * is a near-superset of SSD1306, so `solomon,ssd1306fb-i2c` with explicit
- * width/height drives it correctly. Add `solomon,segment-no-remap` and/or
- * `solomon,com-invdir` if the panel comes up mirrored or upside-down for
- * the specific board's wiring.
+ * GME128128 modules are SH1107/SG1107-based. A local ssd1307fb patch
+ * adds the page-addressing init path these panels need and exposes them
+ * as a normal Linux framebuffer.
  */
 
 /* No /chosen override here: for both kexec paths and FIT boot we set
- * fbcon=font:MINI4x6 + console=tty0 via kernelParams / kexec cmdline,
- * so duplicating them in the DTB just creates merge friction. */
+ * fbcon=font:MINI4x6 via kernelParams / kexec cmdline, so duplicating
+ * it in the DTB just creates merge friction. The OLED is intentionally
+ * not a kernel console; tty1 userspace output still renders through
+ * fbcon without mirroring kernel logs onto the panel. */
 
 &sdhci1 {
 	/* Frees PIN_SD1_* for IIC1 below. The clkgen / wifi-power
@@ -47,15 +47,17 @@
 &i2c1 {
 	pinctrl-0 = <&i2c1_cfg>;
 	pinctrl-names = "default";
-	clock-frequency = <400000>;
+	clock-frequency = <100000>;
 	status = "okay";
 
 	oled@3c {
-		compatible = "solomon,ssd1306fb-i2c";
+		compatible = "goldenmorning,gme128128", "sinowealth,sh1107";
 		reg = <0x3c>;
 		solomon,width = <128>;
-		solomon,height = <64>;
+		solomon,height = <128>;
 		solomon,page-offset = <0>;
+		solomon,col-offset = <0>;
 		solomon,com-offset = <0>;
+		solomon,segment-no-remap;
 	};
 };

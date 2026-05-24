@@ -6,19 +6,18 @@
 #     binary closure so the agent survives the host swapping the
 #     rootfs nbd-server mid-flight.
 #
-# Extracted out of `modules/usb-control.nix` (PLAN.md → T1). Gated by
-# `nanokvm.usbControl.kexec.enable` (default on mainline, off on
-# vendor — see usb-control.nix for the option declaration; we use
-# the value here).
-{
-  config,
-  lib,
-  pkgs,
-  ...
-}: let
+# Extracted out of `modules/usb-control.nix`. Gated by
+# `nanokvm.usbControl.kexec.enable` (default on mainline, off on vendor;
+# see usb-control.nix for the option declaration).
+{ config
+, lib
+, pkgs
+, ...
+}:
+let
   cfg = config.nanokvm.usbControl;
 
-  targetLib = import ./target-script-lib.nix {inherit lib pkgs config;};
+  targetLib = import ./target-script-lib.nix { inherit lib pkgs config; };
   inherit (targetLib) targetTools kernelIsMainline mkTargetScript protocol;
 
   # Everything the kexec agent might touch at runtime — drives the
@@ -39,6 +38,8 @@
     use_running_dtb="''${NANOKVM_USE_RUNNING_DTB:-0}"
     apply_dtb_overlay="''${NANOKVM_APPLY_DTB_OVERLAY:-0}"
     load_only="''${NANOKVM_LOAD_ONLY:-0}"
+    rootfs_host="''${NANOKVM_ROOTFS_HOST:-}"
+    rootfs_port="''${NANOKVM_ROOTFS_PORT:-}"
 
     payload_dev=/dev/nbd1
     payload_mount=/run/kexec-payload
@@ -135,6 +136,12 @@
     mkdir -p "$payload_mount"
     mount -t erofs -o ro "$payload_dev" "$payload_mount"
     cmdline="$(cat "$payload_mount/cmdline")"
+    if [ -n "$rootfs_host" ]; then
+      cmdline="$cmdline nanokvm.nbd_rootfs_host=$rootfs_host"
+    fi
+    if [ -n "$rootfs_port" ]; then
+      cmdline="$cmdline nanokvm.nbd_rootfs_port=$rootfs_port"
+    fi
 
     payload_dtb="$payload_mount/dtb"
     if [ "$use_running_dtb" = 1 ] && [ -r /sys/firmware/fdt ]; then
@@ -204,6 +211,8 @@
     use_running_dtb=0
     apply_dtb_overlay=0
     load_only=0
+    rootfs_host=
+    rootfs_port=
 
     fail() { printf 'ERR %s\n' "$*"; exit 64; }
     valid_bool() { [ "$1" = 0 ] || [ "$1" = 1 ]; }
@@ -241,6 +250,8 @@
         use_running_dtb) use_running_dtb="$value" ;;
         apply_dtb_overlay) apply_dtb_overlay="$value" ;;
         load_only) load_only="$value" ;;
+        rootfs_host) rootfs_host="$value" ;;
+        rootfs_port) rootfs_port="$value" ;;
         *) fail "unknown key: $key" ;;
       esac
     done
@@ -250,12 +261,20 @@
     valid_bool "$use_running_dtb"   || fail "invalid use_running_dtb: $use_running_dtb"
     valid_bool "$apply_dtb_overlay" || fail "invalid apply_dtb_overlay: $apply_dtb_overlay"
     valid_bool "$load_only"         || fail "invalid load_only: $load_only"
+    if [ -n "$rootfs_host" ]; then
+      valid_ipv4 "$rootfs_host" || fail "invalid rootfs_host: $rootfs_host"
+    fi
+    if [ -n "$rootfs_port" ]; then
+      valid_port "$rootfs_port" || fail "invalid rootfs_port: $rootfs_port"
+    fi
 
     printf 'OK starting nanokvm-kexec-agent\n'
 
     export NANOKVM_USE_RUNNING_DTB="$use_running_dtb"
     export NANOKVM_APPLY_DTB_OVERLAY="$apply_dtb_overlay"
     export NANOKVM_LOAD_ONLY="$load_only"
+    export NANOKVM_ROOTFS_HOST="$rootfs_host"
+    export NANOKVM_ROOTFS_PORT="$rootfs_port"
 
     exec </dev/null >>/run/nanokvm-kexec-agent.log 2>&1
     echo "request: $line"
@@ -264,12 +283,12 @@
 
   controlSocket = {
     description = "NanoKVM kexec control socket";
-    wantedBy = ["sockets.target"];
+    wantedBy = [ "sockets.target" ];
     # Bind to the USB gadget address only. The socket used to listen
     # on 0.0.0.0; in stage 2 the wifi variant joins the LAN, and a
     # wildcard bind there made the kexec endpoint reachable from any
     # interface — unauthenticated, root-equivalent.
-    listenStreams = ["${protocol.targetIp}:${toString protocol.ports.kexecCtrl}"];
+    listenStreams = [ "${protocol.targetIp}:${toString protocol.ports.kexecCtrl}" ];
     socketConfig = {
       Accept = true;
       MaxConnections = 1;
@@ -288,7 +307,7 @@
   # kexec-tools, nbd-client-minimal, dtc, glibc, …). ~12 paths on this
   # board.
   kexecStageClosure = pkgs.closureInfo {
-    rootPaths = [kexecAgent kexecRequest] ++ kexecStageRoots;
+    rootPaths = [ kexecAgent kexecRequest ] ++ kexecStageRoots;
   };
 
   # T7: pack the closure into a small EROFS image. At boot we copy
@@ -305,9 +324,10 @@
   # to cp into the cv1800's 216 MB without OOM (zramSwap covers the
   # peak), and immutable so the loop device's reads are predictable.
   kexecMicroEnv =
-    pkgs.runCommand "nanokvm-kexec-micro-env.erofs" {
-      nativeBuildInputs = [pkgs.buildPackages.erofs-utils];
-    } ''
+    pkgs.runCommand "nanokvm-kexec-micro-env.erofs"
+      {
+        nativeBuildInputs = [ pkgs.buildPackages.erofs-utils ];
+      } ''
       mkdir -p root/nix/store
       while IFS= read -r p; do
         cp -a "$p" root/nix/store/
@@ -377,8 +397,8 @@
 
   controlServiceStage2 = lib.recursiveUpdate controlServiceCommon {
     unitConfig = {
-      Requires = ["prepare-kexec-stage.service"];
-      After = ["prepare-kexec-stage.service"];
+      Requires = [ "prepare-kexec-stage.service" ];
+      After = [ "prepare-kexec-stage.service" ];
       # Hard guard: don't even try to start the agent if the
       # micro-env isn't mounted. Otherwise the BindReadOnlyPaths
       # below would fail to set up, leaving systemd to log a
@@ -391,10 +411,11 @@
       # exec()s come from the tmpfs-backed loop device, immune to
       # /dev/nbd0 going away.
       PrivateMounts = true;
-      BindReadOnlyPaths = ["/run/kexec-stage/nix/store:/nix/store"];
+      BindReadOnlyPaths = [ "/run/kexec-stage/nix/store:/nix/store" ];
     };
   };
-in {
+in
+{
   # `nanokvm.usbControl.kexec.enable` is declared in usb-control.nix
   # (the umbrella) so callers see the option even when this file isn't
   # in the import set. We just consume it here.
@@ -412,8 +433,8 @@ in {
         services."usb-kexec-control@" =
           controlServiceCommon
           // {
-            after = ["usb-debug-network.service" "systemd-networkd.service"];
-            wants = ["usb-debug-network.service" "systemd-networkd.service"];
+            after = [ "usb-debug-network.service" "systemd-networkd.service" ];
+            wants = [ "usb-debug-network.service" "systemd-networkd.service" ];
           };
         sockets."usb-kexec-control" = controlSocket;
         storePaths = [
@@ -434,15 +455,15 @@ in {
       systemd.services."prepare-kexec-stage" =
         prepareKexecService
         // {
-          wantedBy = ["sysinit.target"];
-          before = ["sockets.target" "usb-kexec-control.socket"];
+          wantedBy = [ "sysinit.target" ];
+          before = [ "sockets.target" "usb-kexec-control.socket" ];
         };
 
       systemd.services."usb-kexec-control@" =
         controlServiceStage2
         // {
-          after = ["network-online.target" "prepare-kexec-stage.service"];
-          wants = ["network-online.target"];
+          after = [ "network-online.target" "prepare-kexec-stage.service" ];
+          wants = [ "network-online.target" ];
         };
 
       systemd.sockets."usb-kexec-control" = controlSocket;

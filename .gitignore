@@ -17,3 +17,7 @@ secrets/
 # every boot. Per-developer, not committed.
 .ssh_host_*_key
 .ssh_host_*_key.pub
+
+# Host runner status/log files from USB boot and kexec sessions.
+.nanokvm-*.log
+.nanokvm-*.pid

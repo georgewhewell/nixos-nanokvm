@@ -1,0 +1,280 @@
+--- a/drivers/video/fbdev/ssd1307fb.c
++++ b/drivers/video/fbdev/ssd1307fb.c
+@@ -30,6 +30,10 @@
+ #define SSD1307FB_SET_LOOKUP_TABLE	0x91
+ #define	SSD1307FB_CHARGE_PUMP		0x8d
+ #define SSD1307FB_SEG_REMAP_ON		0xa1
++#define SH1107FB_COMMAND		0x00
++#define SH1107FB_DCDC			0xad
++#define SH1107FB_DISPLAY_START_LINE	0xdc
++#define SH1107FB_MAX_DATA_CHUNK	64
+ #define SSD1307FB_DISPLAY_OFF		0xae
+ #define SSD1307FB_SET_MULTIPLEX_RATIO	0xa8
+ #define SSD1307FB_DISPLAY_ON		0xaf
+@@ -52,8 +54,11 @@
+ 	u32 default_vcomh;
+ 	u32 default_dclk_div;
+ 	u32 default_dclk_frq;
++	u32 default_contrast;
+ 	bool need_pwm;
+ 	bool need_chargepump;
++	bool sh1107;
++	u8 sh1107_dcdc;
+ };
+ 
+ struct ssd1307fb_par {
+@@ -209,6 +214,101 @@
+ 	return 0;
+ }
+ 
++static int sh1107fb_write_cmd(struct i2c_client *client, u8 cmd)
++{
++	struct ssd1307fb_array *array;
++	int ret;
++
++	array = ssd1307fb_alloc_array(1, SH1107FB_COMMAND);
++	if (!array)
++		return -ENOMEM;
++
++	array->data[0] = cmd;
++
++	ret = ssd1307fb_write_array(client, array, 1);
++	kfree(array);
++
++	return ret;
++}
++
++static int sh1107fb_set_page_address(struct ssd1307fb_par *par, u8 page,
++				     u8 col)
++{
++	int ret;
++
++	ret = sh1107fb_write_cmd(par->client,
++				 SSD1307FB_START_PAGE_ADDRESS | page);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, 0x10 | ((col >> 4) & 0x0f));
++	if (ret < 0)
++		return ret;
++
++	return sh1107fb_write_cmd(par->client, col & 0x0f);
++}
++
++static int sh1107fb_update_rect(struct ssd1307fb_par *par, unsigned int x,
++				unsigned int y, unsigned int width,
++				unsigned int height)
++{
++	struct ssd1307fb_array *array;
++	u8 *vmem = par->info->screen_buffer;
++	unsigned int line_length = par->info->fix.line_length;
++	unsigned int pages = DIV_ROUND_UP(y % 8 + height, 8);
++	int ret = 0;
++	int i, j, k;
++	unsigned int chunk_x, chunk_width;
++
++	array = ssd1307fb_alloc_array(min_t(unsigned int, width,
++					    SH1107FB_MAX_DATA_CHUNK),
++				      SSD1307FB_DATA);
++	if (!array)
++		return -ENOMEM;
++
++	for (i = y / 8; i < y / 8 + pages; i++) {
++		int m = 8;
++		u32 array_idx = 0;
++
++		if (8 * (i + 1) > par->height)
++			m = par->height % 8;
++
++		for (chunk_x = x; chunk_x < x + width;
++		     chunk_x += chunk_width) {
++			chunk_width = min_t(unsigned int, SH1107FB_MAX_DATA_CHUNK,
++					    x + width - chunk_x);
++			array_idx = 0;
++
++			ret = sh1107fb_set_page_address(par, par->page_offset + i,
++							par->col_offset + chunk_x);
++			if (ret < 0)
++				goto out_free;
++
++			for (j = chunk_x; j < chunk_x + chunk_width; j++) {
++				u8 data = 0;
++
++				for (k = 0; k < m; k++) {
++					u8 byte = vmem[(8 * i + k) *
++						       line_length + j / 8];
++					u8 bit = (byte >> (j % 8)) & 1;
++
++					data |= bit << k;
++				}
++				array->data[array_idx++] = data;
++			}
++
++			ret = ssd1307fb_write_array(par->client, array,
++						    chunk_width);
++			if (ret < 0)
++				goto out_free;
++		}
++	}
++
++out_free:
++	kfree(array);
++	return ret;
++}
++
+ static int ssd1307fb_update_rect(struct ssd1307fb_par *par, unsigned int x,
+ 				 unsigned int y, unsigned int width,
+ 				 unsigned int height)
+@@ -220,6 +292,9 @@
+ 	u32 array_idx = 0;
+ 	int ret, i, j, k;
+ 
++	if (par->device_info->sh1107)
++		return sh1107fb_update_rect(par, x, y, width, height);
++
+ 	array = ssd1307fb_alloc_array(width * pages, SSD1307FB_DATA);
+ 	if (!array)
+ 		return -ENOMEM;
+@@ -295,9 +390,16 @@ static int ssd1307fb_blank(int blank_mode, struct fb_info *info)
+ {
+ 	struct ssd1307fb_par *par = info->par;
+ 
+-	if (blank_mode != FB_BLANK_UNBLANK)
++	if (blank_mode != FB_BLANK_UNBLANK) {
++		if (par->device_info->sh1107)
++			return sh1107fb_write_cmd(par->client,
++						  SSD1307FB_DISPLAY_OFF);
+ 		return ssd1307fb_write_cmd(par->client, SSD1307FB_DISPLAY_OFF);
+-	else
++	} else {
++		if (par->device_info->sh1107)
++			return sh1107fb_write_cmd(par->client,
++						  SSD1307FB_DISPLAY_ON);
+ 		return ssd1307fb_write_cmd(par->client, SSD1307FB_DISPLAY_ON);
++	}
+ }
+ 
+@@ -332,11 +435,122 @@
+ 	ssd1307fb_update_display(info->par);
+ }
+
++static int sh1107fb_init(struct ssd1307fb_par *par)
++{
++	u32 precharge, dclk, com_invdir;
++	u8 seg_remap, dcdc;
++	int ret;
++
++	ret = sh1107fb_write_cmd(par->client, SSD1307FB_DISPLAY_OFF);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, SSD1307FB_SET_CLOCK_FREQ);
++	if (ret < 0)
++		return ret;
++
++	dclk = ((par->dclk_div - 1) & 0xf) | (par->dclk_frq & 0xf) << 4;
++	ret = sh1107fb_write_cmd(par->client, dclk);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, SSD1307FB_SET_ADDRESS_MODE);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, SSD1307FB_CONTRAST);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, par->contrast);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, SH1107FB_DCDC);
++	if (ret < 0)
++		return ret;
++
++	dcdc = par->device_info->sh1107_dcdc ?: 0x8b;
++	ret = sh1107fb_write_cmd(par->client, dcdc);
++	if (ret < 0)
++		return ret;
++
++	seg_remap = par->seg_remap ? SSD1307FB_SEG_REMAP_ON : 0xa0;
++	ret = sh1107fb_write_cmd(par->client, seg_remap);
++	if (ret < 0)
++		return ret;
++
++	com_invdir = 0xc0 | par->com_invdir << 3;
++	ret = sh1107fb_write_cmd(par->client, com_invdir);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, SH1107FB_DISPLAY_START_LINE);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, 0);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, SSD1307FB_SET_DISPLAY_OFFSET);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, par->com_offset);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, SSD1307FB_SET_PRECHARGE_PERIOD);
++	if (ret < 0)
++		return ret;
++
++	precharge = (par->prechargep1 & 0xf) | (par->prechargep2 & 0xf) << 4;
++	ret = sh1107fb_write_cmd(par->client, precharge);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, SSD1307FB_SET_VCOMH);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, par->vcomh);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, SSD1307FB_SET_MULTIPLEX_RATIO);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, par->height - 1);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, 0xa4);
++	if (ret < 0)
++		return ret;
++
++	ret = sh1107fb_write_cmd(par->client, 0xa6);
++	if (ret < 0)
++		return ret;
++
++	msleep(100);
++
++	ret = ssd1307fb_update_display(par);
++	if (ret < 0)
++		return ret;
++
++	return sh1107fb_write_cmd(par->client, SSD1307FB_DISPLAY_ON);
++}
++
+ static int ssd1307fb_init(struct ssd1307fb_par *par)
+ {
+ 	struct pwm_state pwmstate;
+ 	int ret;
+ 	u32 precharge, dclk, com_invdir, compins;
+ 
++	if (par->device_info->sh1107)
++		return sh1107fb_init(par);
++
+ 	if (par->device_info->need_pwm) {
+ 		par->pwm = pwm_get(&par->client->dev, NULL);
+ 		if (IS_ERR(par->pwm)) {

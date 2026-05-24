@@ -2,7 +2,7 @@
 # Consumed via buildLinux's structuredExtraConfig — each attr becomes a
 # CONFIG_* line (or "# CONFIG_* is not set" for `no`) merged on top of
 # `make defconfig`; the result is reconciled by `make olddefconfig`.
-{lib}:
+{ lib }:
 with lib.kernel; {
   # =====================================================================
   # Enables — SoC + gadget + aic8800 OOT driver
@@ -18,13 +18,13 @@ with lib.kernel; {
   USB_CONFIGFS_ACM = yes;
   USB_CONFIGFS_SERIAL = yes;
   USB_CONFIGFS_RNDIS = yes;
-  USB_CONFIGFS_NCM = yes;       # for boards.<...>.live.usb-ncm
+  USB_CONFIGFS_NCM = yes; # for boards.<...>.live.usb-ncm
   USB_F_ECM = yes;
   USB_F_ACM = yes;
   USB_F_SERIAL = yes;
   USB_F_RNDIS = yes;
   USB_F_NCM = yes;
-  USB_F_MASS_STORAGE = yes;     # available to configfs
+  USB_F_MASS_STORAGE = yes; # available to configfs
 
   # Gadget driver coexistence:
   #
@@ -49,7 +49,7 @@ with lib.kernel; {
   USB_ETH = no;
   USB_G_MULTI = yes;
   USB_G_MULTI_RNDIS = yes;
-  USB_G_MULTI_CDC = no;        # see comment below
+  USB_G_MULTI_CDC = no; # see comment below
   USB_MASS_STORAGE = no;
   # On the dev-board test 2026-05-13, building g_multi with BOTH the
   # RNDIS and CDC-ECM configs caused Linux on the host to prefer
@@ -185,21 +185,18 @@ with lib.kernel; {
   SOPHGO_CV1800B_DMAMUX = yes;
 
   # Legacy framebuffer subsystem + ssd1307fb (drives SSD1305/06/07/09 and
-  # SSD1306-compat panels like our SSD1312 over I²C) + fbcon. Used by the
-  # `-oled` build variant to put kernel printk on a small panel wired to
-  # IIC1; no-op on standard builds where no /dev/i2c-*/oled@3c child node
-  # exists in DT, so the driver never probes. ssd1307fb selects PWM,
-  # FB_DEFERRED_IO, FB_SYS_*, BACKLIGHT_CLASS_DEVICE — listing the leaves
-  # explicitly keeps olddefconfig honest if a select gets dropped.
+  # our locally patched SH1107 path) + fbcon. Keep ssd1307fb modular so
+  # USB/NBD initrd boot does not depend on OLED probe success; the OLED
+  # module loads in stage 2 via modules/oled.nix.
   FB = yes;
-  FB_SSD1307 = yes;
+  FB_SSD1307 = module;
   FRAMEBUFFER_CONSOLE = yes;
+  FRAMEBUFFER_CONSOLE_ROTATION = yes;
   BACKLIGHT_CLASS_DEVICE = yes;
-  # Compile in the 4×6 micro-font for the 128×64 OLED. Default 8×16 gives
-  # only 16 cols × 4 rows — barely enough to spell `Kernel panic`. MINI4x6
-  # gives 32×10. Selected at runtime via `fbcon=font:MINI4x6` in the
-  # oled-variant dtsi's /chosen/bootargs; defconfig-default 8×16 stays in
-  # for non-OLED builds.
+  # Compile in the 4×6 micro-font for the 128×128 OLED. Default 8×16 gives
+  # only 16 cols × 8 rows. MINI4x6 gives 32 columns and enough rows for
+  # tools such as top. Selected at runtime via `fbcon=font:MINI4x6`; the
+  # OLED variant also enables fbcon's software rotation.
   #
   # CONFIG_FONTS gates per-font selection; without it, only the
   # `default y if FRAMEBUFFER_CONSOLE` fonts (8x8, 8x16) get pulled in

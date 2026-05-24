@@ -6,12 +6,12 @@
 #
 # Pairs with `./usb-control.nix`, which provides the kexec control
 # socket, debug shell, and networkd config in both initrd and stage 2.
-{
-  config,
-  lib,
-  pkgs,
-  ...
-}: let
+{ config
+, lib
+, pkgs
+, ...
+}:
+let
   protocol = import ../lib/protocol.nix;
   nbdDevice = "/dev/nbd0";
   rootFsTarget = "sysroot-nix-.ro\\x2dstore.mount";
@@ -29,8 +29,8 @@
   # configured mac/ip/prefix rather than always taking them from
   # protocol.nix. The option submodule advertised this; we now make
   # the script actually read it.
-  staticMac = if nbdStaticIface != null then nbdStaticIface.mac    else protocol.targetMac;
-  staticIp  = if nbdStaticIface != null then nbdStaticIface.ip     else protocol.targetIp;
+  staticMac = if nbdStaticIface != null then nbdStaticIface.mac else protocol.targetMac;
+  staticIp = if nbdStaticIface != null then nbdStaticIface.ip else protocol.targetIp;
   staticPfx = if nbdStaticIface != null then nbdStaticIface.prefix else protocol.prefix;
   shellLib = ''
     nanokvm_target_mac=${staticMac}
@@ -39,6 +39,31 @@
     nanokvm_prefix=${staticPfx}
     nanokvm_port_status=${toString protocol.ports.statusSink}
     nanokvm_port_nbd_rootfs=${toString nbdPort}
+
+    nanokvm_cmdline_value() {
+      local key="$1" item
+      for item in $(cat /proc/cmdline 2>/dev/null || true); do
+        case "$item" in
+          "$key="*)
+            printf '%s\n' "''${item#"$key="}"
+            return 0
+            ;;
+        esac
+      done
+      return 1
+    }
+
+    nanokvm_apply_nbd_cmdline() {
+      local value
+      if value="$(nanokvm_cmdline_value nanokvm.nbd_rootfs_host)"; then
+        nanokvm_host_ip="$value"
+      fi
+      if value="$(nanokvm_cmdline_value nanokvm.nbd_rootfs_port)"; then
+        nanokvm_port_nbd_rootfs="$value"
+      fi
+    }
+
+    nanokvm_apply_nbd_cmdline
 
     nanokvm_find_iface() {
       local desired="''${1:-$nanokvm_target_mac}" path observed
@@ -295,10 +320,11 @@
     # off to stage 2; in stage 2, normal target transitions and shutdown
     # must not pull the live store out from under systemd. Override
     # ExecStop in both layers.
-    ExecStop = lib.mkForce [""];
+    ExecStop = lib.mkForce [ "" ];
   };
-in {
-  imports = [./usb-control.nix];
+in
+{
+  imports = [ ./usb-control.nix ];
 
   options.nanokvm.nbdLive = with lib; {
     host = mkOption {
@@ -363,23 +389,23 @@ in {
       "/" = {
         device = "tmpfs";
         fsType = "tmpfs";
-        options = ["mode=0755"];
+        options = [ "mode=0755" ];
       };
       "/nix/.ro-store" = {
         device = nbdDevice;
         fsType = "erofs";
-        options = ["ro"];
+        options = [ "ro" ];
         neededForBoot = true;
       };
       "/nix/.rw-store" = {
         device = "tmpfs";
         fsType = "tmpfs";
-        options = ["mode=0755"];
+        options = [ "mode=0755" ];
         neededForBoot = true;
       };
       "/nix/store" = {
         overlay = {
-          lowerdir = ["/nix/.ro-store"];
+          lowerdir = [ "/nix/.ro-store" ];
           upperdir = "/nix/.rw-store/store";
           workdir = "/nix/.rw-store/work";
         };
@@ -388,7 +414,7 @@ in {
       "/tmp" = {
         device = "tmpfs";
         fsType = "tmpfs";
-        options = ["mode=1777"];
+        options = [ "mode=1777" ];
       };
     };
 
@@ -415,7 +441,7 @@ in {
           SurviveFinalKillSignal = true;
         };
         serviceConfig = {
-          ExecStop = lib.mkForce [""];
+          ExecStop = lib.mkForce [ "" ];
           KillMode = "none";
           SendSIGKILL = false;
         };
@@ -455,7 +481,7 @@ in {
       # to a no-op so systemd-udevd is left running past the switch-root.
       services.initrd-udevadm-cleanup-db = {
         overrideStrategy = "asDropinIfExists";
-        unitConfig.Conflicts = lib.mkForce [];
+        unitConfig.Conflicts = lib.mkForce [ ];
         serviceConfig.ExecStart = lib.mkForce [
           ""
           "${pkgs.coreutils}/bin/true"
@@ -464,7 +490,7 @@ in {
 
       services.nanokvm-root-nbd = {
         description = "Connect the NanoKVM live root NBD device";
-        wantedBy = ["initrd-root-fs.target"];
+        wantedBy = [ "initrd-root-fs.target" ];
         wants = [
           "systemd-networkd.service"
           "usb-gadget.service"
@@ -489,7 +515,7 @@ in {
 
       services."usb-debug-status" = {
         description = "Push initrd status over the USB debug network";
-        wantedBy = ["initrd-root-fs.target"];
+        wantedBy = [ "initrd-root-fs.target" ];
         after = [
           "systemd-networkd.service"
           "usb-gadget.service"
@@ -498,7 +524,7 @@ in {
           "systemd-networkd.service"
           "usb-gadget.service"
         ];
-        before = ["initrd-root-fs.target"];
+        before = [ "initrd-root-fs.target" ];
         unitConfig.DefaultDependencies = false;
         serviceConfig = {
           ExecStart = "${pushDebugStatus} initrd";
@@ -515,7 +541,7 @@ in {
 
     systemd.services.nanokvm-root-nbd = {
       description = "Keep the NanoKVM live root NBD device connected";
-      wantedBy = ["multi-user.target"];
+      wantedBy = [ "multi-user.target" ];
       unitConfig = {
         DefaultDependencies = false;
         IgnoreOnIsolate = true;
@@ -537,7 +563,7 @@ in {
         Type = "oneshot";
         RemainAfterExit = true;
         ExecStart = "${pkgs.coreutils}/bin/true";
-        ExecStop = lib.mkForce [""];
+        ExecStop = lib.mkForce [ "" ];
         KillMode = "none";
         SendSIGKILL = false;
       };
@@ -545,9 +571,9 @@ in {
 
     systemd.services.usb-debug-status = {
       description = "Push stage2 status over the USB debug network";
-      wantedBy = ["sysinit.target"];
-      after = ["systemd-networkd.service"];
-      wants = ["systemd-networkd.service"];
+      wantedBy = [ "sysinit.target" ];
+      after = [ "systemd-networkd.service" ];
+      wants = [ "systemd-networkd.service" ];
       unitConfig.DefaultDependencies = false;
       serviceConfig = {
         ExecStart = "${pushDebugStatus} stage2";

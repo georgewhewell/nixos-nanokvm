@@ -21,7 +21,8 @@
     statusSink = 2324;
     # Target listens here for one kexec request per connection.
     kexecCtrl = 2325;
-    # Host serves the live rootfs EROFS as NBD.
+    # Default/fallback live-rootfs NBD port. Host runners normally pass
+    # a runtime-selected port via nanokvm.nbd_rootfs_port=.
     nbdRootfs = 10809;
     # Host serves the kexec payload EROFS as NBD.
     nbdPayload = 10810;

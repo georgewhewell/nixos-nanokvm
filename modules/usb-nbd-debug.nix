@@ -1,7 +1,7 @@
-{
-  pkgs,
-  ...
-}: let
+{ pkgs
+, ...
+}:
+let
   protocol = import ../lib/protocol.nix;
   debugNbd = pkgs.writeShellScript "nanokvm-debug-nbd" ''
     set -eu
@@ -14,6 +14,26 @@
     host_ip=${protocol.hostIp}
     status_port=${toString protocol.ports.statusSink}
     nbd_port=${toString protocol.ports.nbdRootfs}
+
+    cmdline_value() {
+      local key="$1" item
+      for item in $("$bb" cat /proc/cmdline 2>/dev/null || true); do
+        case "$item" in
+          "$key="*)
+            printf '%s\n' "''${item#"$key="}"
+            return 0
+            ;;
+        esac
+      done
+      return 1
+    }
+
+    if value="$(cmdline_value nanokvm.nbd_rootfs_host)"; then
+      host_ip="$value"
+    fi
+    if value="$(cmdline_value nanokvm.nbd_rootfs_port)"; then
+      nbd_port="$value"
+    fi
 
     find_usb_iface() {
       local path mac
@@ -126,15 +146,16 @@
 
     wait "$client"
   '';
-in {
+in
+{
   config = {
     system.build.nanokvmDebugNbd = debugNbd;
 
     boot.initrd.systemd.services.nanokvm-debug-nbd = {
       description = "Automatically test NanoKVM NBD root mounting";
-      wantedBy = ["initrd.target"];
-      after = ["usb-gadget.service"];
-      wants = ["usb-gadget.service"];
+      wantedBy = [ "initrd.target" ];
+      after = [ "usb-gadget.service" ];
+      wants = [ "usb-gadget.service" ];
       serviceConfig = {
         ExecStart = debugNbd;
         Restart = "always";

@@ -4,17 +4,17 @@
 #   * networkd "40-usb0" matching the gadget MAC (initrd and stage-2)
 #   * configureUsbNetwork — belt-and-suspenders address fixup
 #   * acmStatus — one-shot initrd status block to /dev/ttyGS0
-#   * one-shot debug shell on TCP/2323 (busybox telnetd, USB-bound)
+#   * debug shell on TCP/2323 (initrd BusyBox, stage-2 login shell)
 #
 # The kexec subsystem (request socket on TCP/2325, agent, payload mount,
 # prepare-kexec-stage) used to live here too — now in
 # ./control-plane/kexec.nix, imported via the `imports` list below.
-{
-  config,
-  lib,
-  pkgs,
-  ...
-}: let
+{ config
+, lib
+, pkgs
+, ...
+}:
+let
   cfg = config.nanokvm.usbControl;
 
   # Shared helpers: protocol, kernel-dependent target tool list,
@@ -67,15 +67,35 @@
     matchConfig = {
       MACAddress = protocol.targetMac;
     };
-    address = ["${protocol.targetIp}/${protocol.prefix}"];
+    address = [ "${protocol.targetIp}/${protocol.prefix}" ];
     networkConfig = {
       KeepConfiguration = "static";
       LinkLocalAddressing = "no";
     };
   };
 
-  debugShellExec = "${pkgs.busybox}/bin/telnetd -F -b ${protocol.targetIp}:${toString protocol.ports.debugShell} -l ${pkgs.busybox}/bin/sh";
-in {
+  initrdDebugShellExec = "${pkgs.busybox}/bin/telnetd -F -b ${protocol.targetIp}:${toString protocol.ports.debugShell} -l ${pkgs.busybox}/bin/sh";
+  stage2DebugShell = pkgs.writeShellScript "nanokvm-stage2-debug-shell" ''
+    export PATH=/run/current-system/sw/bin:/run/wrappers/bin:$PATH
+    export TERM="''${TERM:-linux}"
+    user=${lib.escapeShellArg cfg.stage2ShellUser}
+    cd / 2>/dev/null || true
+
+    if getent passwd "$user" >/dev/null 2>&1 && [ -x /run/wrappers/bin/su ]; then
+      exec /run/wrappers/bin/su -l "$user"
+    fi
+
+    if [ -x /run/wrappers/bin/su ]; then
+      exec /run/wrappers/bin/su -l root
+    fi
+
+    root_shell="$(getent passwd root 2>/dev/null | cut -d: -f7 || true)"
+    [ -n "$root_shell" ] || root_shell=/run/current-system/sw/bin/sh
+    exec "$root_shell" -l
+  '';
+  stage2DebugShellExec = "${pkgs.busybox}/bin/telnetd -F -b ${protocol.targetIp}:${toString protocol.ports.debugShell} -l ${stage2DebugShell}";
+in
+{
   imports = [
     ./control-plane/inert-initrd.nix
     ./control-plane/kexec.nix
@@ -103,6 +123,16 @@ in {
       '';
     };
 
+    stage2ShellUser = mkOption {
+      type = types.str;
+      default = "root";
+      description = ''
+        User account entered by the stage-2 TCP debug shell. The initrd
+        debug shell remains BusyBox root because it runs before the
+        NixOS account database exists.
+      '';
+    };
+
     kexec.enable = mkOption {
       type = types.bool;
       default = kernelIsMainline;
@@ -122,7 +152,7 @@ in {
     };
 
     # `inertSwitchRoot.enable` option is defined in
-    # ./control-plane/inert-initrd.nix (extracted PLAN.md → T1).
+    # ./control-plane/inert-initrd.nix.
   };
 
   config = lib.mkMerge [
@@ -136,7 +166,7 @@ in {
       boot.loader.generic-extlinux-compatible.enable = lib.mkForce false;
 
       boot.initrd.compressor = "zstd";
-      boot.initrd.compressorArgs = ["-19" "-T0"];
+      boot.initrd.compressorArgs = [ "-19" "-T0" ];
       boot.initrd.network.enable = lib.mkForce false;
       boot.initrd.services.bcache.enable = lib.mkForce false;
       boot.initrd.services.lvm.enable = lib.mkForce false;
@@ -172,9 +202,9 @@ in {
         services = {
           "usb-debug-network" = {
             description = "Configure the USB debug network";
-            wantedBy = ["initrd.target"];
-            after = ["usb-gadget.service"];
-            wants = ["usb-gadget.service"];
+            wantedBy = [ "initrd.target" ];
+            after = [ "usb-gadget.service" ];
+            wants = [ "usb-gadget.service" ];
             unitConfig.DefaultDependencies = false;
             serviceConfig = {
               Type = "oneshot";
@@ -185,7 +215,7 @@ in {
 
           "usb-debug-shell" = {
             description = "Root shell on the USB debug network";
-            wantedBy = ["initrd.target"];
+            wantedBy = [ "initrd.target" ];
             after = [
               "usb-debug-network.service"
               "systemd-networkd.service"
@@ -198,7 +228,7 @@ in {
             ];
             unitConfig.DefaultDependencies = false;
             serviceConfig = {
-              ExecStart = debugShellExec;
+              ExecStart = initrdDebugShellExec;
               Restart = "always";
               RestartSec = "1s";
             };
@@ -206,7 +236,7 @@ in {
 
           "usb-debug-acm-status" = {
             description = "Print one NanoKVM initrd status block on USB ACM";
-            wantedBy = ["initrd.target"];
+            wantedBy = [ "initrd.target" ];
             after = [
               "usb-debug-network.service"
               "usb-gadget.service"
@@ -249,12 +279,14 @@ in {
       ];
 
       systemd.services."usb-debug-shell" = {
-        description = "Root shell on the USB debug network";
-        wantedBy = ["multi-user.target"];
-        after = ["network-online.target"];
-        wants = ["network-online.target"];
+        description = "User shell on the USB debug network";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "network-online.target" ]
+          ++ lib.optional config.services.userborn.enable "userborn.service";
+        wants = [ "network-online.target" ]
+          ++ lib.optional config.services.userborn.enable "userborn.service";
         serviceConfig = {
-          ExecStart = debugShellExec;
+          ExecStart = stage2DebugShellExec;
           Restart = "always";
           RestartSec = "1s";
         };

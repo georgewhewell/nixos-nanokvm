@@ -21,12 +21,13 @@
 #   dropWhen        free-form: condition under which we can remove it
 #   notes           free-form rationale beyond what the patch header says
 let
-  patch = {
-    name,
-    patch,
-  }: {
-    inherit name patch;
-  };
+  patch =
+    { name
+    , patch
+    ,
+    }: {
+      inherit name patch;
+    };
 
   patches = [
     (patch {
@@ -64,6 +65,18 @@ let
     (patch {
       name = "nbd-survive-SIGSTOP-during-NBD_DO_IT";
       patch = ./patches/0009-nbd-survive-SIGSTOP-during-NBD_DO_IT.patch;
+    })
+    (patch {
+      name = "fbdev-ssd1307fb-add-sh1107-page-mode-support";
+      patch = ./patches/0010-fbdev-ssd1307fb-add-sh1107-page-mode-support.patch;
+    })
+    (patch {
+      name = "fbdev-ssd1307fb-finish-sh1107-bindings";
+      patch = ./patches/0011-fbdev-ssd1307fb-finish-sh1107-bindings.patch;
+    })
+    (patch {
+      name = "fbdev-ssd1307fb-mark-buffer-as-virtual-framebuffer";
+      patch = ./patches/0012-fbdev-ssd1307fb-mark-buffer-as-virtual-framebuffer.patch;
     })
   ];
 
@@ -166,7 +179,41 @@ let
         SIGCONT/SIGTERM-with-handler; SIGKILL still breaks out.
       '';
     };
+    "fbdev-ssd1307fb-add-sh1107-page-mode-support" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "mainline ssd1307fb or a DRM tiny driver gains SH1107 support";
+      notes = ''
+        GME128128/SG1107 128x128 OLED panels ACK at the SSD1306-style
+        0x3c address but need SH1107 page addressing and DC-DC command
+        0xad 0x8b before the display lights. This keeps fbcon and
+        /dev/fb0 working without a userspace I2C daemon.
+      '';
+    };
+    "fbdev-ssd1307fb-finish-sh1107-bindings" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "fold into fbdev-ssd1307fb-add-sh1107-page-mode-support";
+      notes = ''
+        Follow-up while iterating on hardware: adds the OF/I2C match
+        table entries and avoids registering SH1107 contrast as a
+        system backlight, which systemd-backlight can otherwise poke
+        during boot.
+      '';
+    };
+    "fbdev-ssd1307fb-mark-buffer-as-virtual-framebuffer" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "mainline ssd1307fb marks its RAM backing store with FBINFO_VIRTFB";
+      notes = ''
+        Linux 7.0's sys_imageblit/sys_fillrect helpers warn when a
+        RAM-backed framebuffer does not set FBINFO_VIRTFB. ssd1307fb
+        allocates normal memory and flushes it via deferred I/O, so mark
+        it as virtual to avoid alarming boot-time fbcon warnings.
+      '';
+    };
   };
-in {
+in
+{
   inherit patches meta;
 }

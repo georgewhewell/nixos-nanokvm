@@ -12,6 +12,8 @@ The catalog of every shipped configuration lives in `lib/catalog.nix`;
 all `nixosConfigurations.boards.*` and `packages.<sys>.boards.*` outputs
 are generated from that one list.
 
+![LicheeRV-Nano-W running top on the 128x128 OLED](./IMG_2681.jpeg)
+
 ## Build
 
 ```sh
@@ -38,15 +40,37 @@ nix run .#boards.licheerv.mainline.kernel-test.usb-boot
 
 # Full stage-2 over NBD with the standard CDC-ECM gadget:
 nix run .#boards.licheerv.mainline.live.usb.usb-boot
-# → SSH on root@10.55.0.1 (host key cached at $PWD/.ssh_host_*_key,
-#   per-device, gitignored).
+# → SSH on root@10.55.0.1 or nixos@10.55.0.1 (password: nixos;
+#   host key cached at $PWD/.ssh_host_*_key, per-device, gitignored).
 # Leave the process running — it's the NBD backing store for /nix/.ro-store.
+
+# Full stage-2 with the 128x128 OLED framebuffer running top on-screen:
+nix run .#usb-oled-top
 ```
 
+`usb-oled-top` uses ROM/fastboot when the board is in BOOT mode. If a
+previous live image is already up on the USB debug network, the same
+command detects the USB-ECM host interface and kexecs directly into the
+new image instead. Override with `NANOKVM_BOOT_MODE=usb` or
+`NANOKVM_BOOT_MODE=kexec` when you want to force one path.
+
 The host-side runner configures the USB-ECM iface as `10.55.0.2/24`,
-serves the EROFS rootfs via `nbd-server`, and pushes pre-generated SSH
-host keys via the initrd debug shell so the SG2002 doesn't spend ~60 s
-on `sshd-keygen`. SSH is up ~10 s after `bootm`.
+serves the EROFS rootfs via `nbd-server`, passes the chosen NBD endpoint
+on the kernel cmdline, and pushes pre-generated SSH host keys via the
+initrd debug shell so the SG2002 doesn't spend ~60 s on `sshd-keygen`.
+SSH is up ~10 s after `bootm`. Set `NANOKVM_NBD_ROOTFS_PORT=<port>` to
+force a port; the default `auto` chooses a free runtime port.
+Direct USB boot also cleans up stale NanoKVM rootfs `nbd-server`
+processes; set `NANOKVM_NBD_CLEANUP=0` to opt out. By default the
+runner then attaches to the target shell on TCP/2323.
+After stage 2 is up this enters the normal `nixos` user account through
+the system login shell; if the boot stalls before pivoting, the same
+port is still the initrd BusyBox shell. Use `NANOKVM_ATTACH=none` to
+keep only the NBD backing store open, or `NANOKVM_STATUS_LISTEN=1` to
+print the verbose target status stream. For `usb-oled-top`, shell
+logout defaults to `NANOKVM_ON_DETACH=kexec`, which immediately kexecs
+the target once into the currently built image; set
+`NANOKVM_ON_DETACH=hold` to preserve the old rootfs NBD session instead.
 
 If `lib.protocol`'s default MAC doesn't match (e.g. you've renamed the
 gadget), pass the iface name explicitly:
@@ -79,8 +103,7 @@ nix run .#boards.licheerv.mainline.live.usb-rndis.kexec
 The kexec runner serves the new payload over a second NBD socket
 (10810), tells the target's `usb-kexec-control@.service` (port 2325)
 to load+exec it, then swaps the rootfs nbd-server for the new variant's
-EROFS. See `project_kexec_nbd_resilience.md` in `~/.claude/.../memory/`
-for the design (page-cache priming + 3 s host defer).
+EROFS.
 
 ### kernel-test / debug variants
 
@@ -107,8 +130,7 @@ Patches must apply at the NanoKVM repo root so they cover both `server/`
 and `web/`.
 
 For kernel patches against `linux_latest`, see `pkgs/sg2002/linux-mainline/`.
-Each patch should carry origin + upstream-status metadata; see
-`PLAN.md → P7`.
+Each patch should carry origin + upstream-status metadata.
 
 ## Using `nanokvm-server` on a non-cv181x host (Rock-5B etc.)
 
@@ -171,7 +193,6 @@ What you don't get without cv181x hardware:
   deployments.
 - `./wifi.conf` — `wpa_supplicant.conf` body. Used only when the wifi
   mixin is in the configuration. **Contents end up in the nix store.**
-  See `PLAN.md → P3` for the planned secret-handling fix.
 - `./.ssh_host_{ed25519,rsa}_key{,.pub}` — auto-generated host keys
   (gitignored). The usb-boot runner generates these on first run and
   pushes them to the device so `sshd-keygen` skips.
@@ -191,8 +212,6 @@ What you don't get without cv181x hardware:
 | `platform/` | shared cv181x platform module |
 | `profiles/` | per-profile NixOS modules (kernel-test, debug, live, sd) |
 | `modules/` | service modules (usb-control, nbd-live, gadget, oled, …) |
-| `modules/control-plane/` | per-facet control-plane modules (PLAN.md → T1) |
+| `modules/control-plane/` | per-facet control-plane modules |
 | `pkgs/` | overlay derivations (kernels, U-Boot, FIP, vendor blobs, …) |
-| `apps/oled/` | tty1-driven OLED status app |
 | `scripts/` | host-side dev scripts (bench, etc.) |
-| `PLAN.md` | active refactor plan (Tier S done, T1/T5/T6/T7 still open) |

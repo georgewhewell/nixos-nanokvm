@@ -6,26 +6,28 @@
 # earlier ones. Two flavours:
 #
 #   .dtb     — bw.dtsi only (default: WiFi/SDIO1 enabled).
-#   .dtbOled — bw.dtsi + bw-oled.dtsi (SDIO1 disabled, IIC1 + SSD1306
+#   .dtbOled — bw.dtsi + bw-oled.dtsi (SDIO1 disabled, IIC1 + SH1107
 #              child on the freed-up SD1 pads). Pair with builds that
 #              also turn sg2002.wifi.enable off.
 #   .dtbs    — directory-shaped wrapper for NixOS's
 #              `hardware.deviceTree.package` (covers the default DTB).
-{
-  lib,
-  runCommand,
-  dtc,
-  gcc,
-  linuxSrc,
-}: let
+{ lib
+, runCommand
+, dtc
+, gcc
+, linuxSrc
+,
+}:
+let
   # Each overlay has to be interpolated into the script body individually
   # — `toString [path1 path2]` doesn't trigger Nix's path-to-store import,
   # it just stringifies the raw source paths, which are then missing from
   # the build's closure. `${p}` per element does the import.
   buildDtb = name: overlays:
-    runCommand "${name}.dtb" {
-      nativeBuildInputs = [dtc gcc];
-    } ''
+    runCommand "${name}.dtb"
+      {
+        nativeBuildInputs = [ dtc gcc ];
+      } ''
       tar -xf ${linuxSrc}
       SRC=$(echo linux-*/)
       DTS=$SRC/arch/riscv/boot/dts/sophgo/sg2002-licheerv-nano-b.dts
@@ -54,12 +56,12 @@
     ./sg2002-licheerv-nano-bw-nowifi.dtsi
   ];
 
-  dtbs =
-    runCommand "sg2002-dtbs" {} ''
-      mkdir -p $out/sophgo
-      cp ${dtb} $out/sophgo/sg2002-licheerv-nano-bw.dtb
-    '';
-in {
+  dtbs = runCommand "sg2002-dtbs" { } ''
+    mkdir -p $out/sophgo
+    cp ${dtb} $out/sophgo/sg2002-licheerv-nano-bw.dtb
+  '';
+in
+{
   inherit dtb dtbs;
   oled = dtbOled;
   nowifi = dtbNoWifi;

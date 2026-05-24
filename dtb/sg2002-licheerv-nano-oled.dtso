@@ -5,8 +5,9 @@
  * Runtime overlay for the LicheeRV Nano OLED test path.
  *
  * The base DTB comes from /sys/firmware/fdt so kexec preserves the exact
- * USB/runtime state U-Boot gave the current kernel. This overlay only
- * trades SDIO1/WiFi pads for IIC1 and adds the SSD1306-compatible panel.
+ * USB/runtime state U-Boot gave the current kernel. This overlay trades
+ * SDIO1/WiFi pads for IIC1 and instantiates the SH1107 framebuffer
+ * device at 0x3c.
  */
 
 / {
@@ -39,16 +40,18 @@
 		__overlay__ {
 			pinctrl-0 = <&i2c1_cfg>;
 			pinctrl-names = "default";
-			clock-frequency = <400000>;
+			clock-frequency = <100000>;
 			status = "okay";
 
 			oled@3c {
-				compatible = "solomon,ssd1306fb-i2c";
+				compatible = "goldenmorning,gme128128", "sinowealth,sh1107";
 				reg = <0x3c>;
 				solomon,width = <128>;
-				solomon,height = <64>;
+				solomon,height = <128>;
 				solomon,page-offset = <0>;
+				solomon,col-offset = <0>;
 				solomon,com-offset = <0>;
+				solomon,segment-no-remap;
 			};
 		};
 	};
