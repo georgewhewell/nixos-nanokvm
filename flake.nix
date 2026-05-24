@@ -480,6 +480,22 @@
                               "$@"
             '';
           };
+          captureUsbOledTop = pkgs.writeShellApplication {
+            name = "capture-usb-oled-top";
+            runtimeInputs = with pkgs; [
+              asciinema
+              asciinema-agg
+              coreutils
+              git
+              gnused
+            ];
+            text = ''
+              export NANOKVM_USB_OLED_TOP="''${NANOKVM_USB_OLED_TOP:-${usbOledTop}/bin/usb-oled-top}"
+              export NANOKVM_CAPTURE_FONT_DIR="''${NANOKVM_CAPTURE_FONT_DIR:-${pkgs.dejavu_fonts}/share/fonts/truetype}"
+              export NANOKVM_CAPTURE_FONT_FAMILY="''${NANOKVM_CAPTURE_FONT_FAMILY:-DejaVu Sans Mono}"
+              ${builtins.readFile ./scripts/capture-usb-oled-top.sh}
+            '';
+          };
         in
         lib.optionalAttrs pkgs.stdenv.isLinux
           {
@@ -492,6 +508,10 @@
           usb-oled-top = {
             type = "app";
             program = "${usbOledTop}/bin/usb-oled-top";
+          };
+          capture-usb-oled-top = {
+            type = "app";
+            program = "${captureUsbOledTop}/bin/capture-usb-oled-top";
           };
         });
 

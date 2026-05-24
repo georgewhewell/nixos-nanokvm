@@ -46,6 +46,9 @@ nix run .#boards.licheerv.mainline.live.usb.usb-boot
 
 # Full stage-2 with the 128x128 OLED framebuffer running top on-screen:
 nix run .#usb-oled-top
+
+# Record that boot/kexec flow and render an animated GIF:
+nix run .#capture-usb-oled-top
 ```
 
 `usb-oled-top` uses ROM/fastboot when the board is in BOOT mode. If a
@@ -71,6 +74,13 @@ print the verbose target status stream. For `usb-oled-top`, shell
 logout defaults to `NANOKVM_ON_DETACH=kexec`, which immediately kexecs
 the target once into the currently built image; set
 `NANOKVM_ON_DETACH=hold` to preserve the old rootfs NBD session instead.
+
+`capture-usb-oled-top` writes an asciicast plus rendered GIF under
+`media/captures/`. It sets `NANOKVM_ATTACH=none` by default so the
+recording ends after the runner reaches SSH or hands off the new rootfs
+NBD socket. The runner is left alive after capture so the target keeps
+its rootfs; stop the printed PID when you are done, or set
+`NANOKVM_CAPTURE_KEEP_RUNNER=0` to make capture teardown automatic.
 
 If `lib.protocol`'s default MAC doesn't match (e.g. you've renamed the
 gadget), pass the iface name explicitly:

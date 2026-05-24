@@ -21,3 +21,6 @@ secrets/
 # Host runner status/log files from USB boot and kexec sessions.
 .nanokvm-*.log
 .nanokvm-*.pid
+
+# Local terminal recordings and rendered boot GIFs.
+media/captures/
