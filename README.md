@@ -14,6 +14,8 @@ are generated from that one list.
 
 ![LicheeRV-Nano-W running top on the 128x128 OLED](./IMG_2681.jpeg)
 
+![USB booting NixOS stage 2 and querying the live NanoKVM over SSH](./media/captures/usb-oled-top-20260525-202708.gif)
+
 ## Build
 
 ```sh

@@ -7,7 +7,8 @@
 # board — `nix run .#boards.licheerv.<kernel>.live.usb` reboots the
 # device, kexecs into this stage 2, and lands you at an SSH login on
 # 10.55.0.1.
-{ lib
+{ config
+, lib
 , pkgs
 , nixpkgs
 , rootAuthorizedKeys ? [ ]
@@ -55,6 +56,16 @@
       PasswordAuthentication = true;
     };
   };
+  systemd.services.sshd = lib.mkIf config.services.userborn.enable {
+    after = [
+      "systemd-tmpfiles-setup.service"
+      "userborn.service"
+    ];
+    wants = [
+      "systemd-tmpfiles-setup.service"
+      "userborn.service"
+    ];
+  };
 
   users.users = {
     root = {
@@ -98,5 +109,6 @@
     btop
     fio
     iperf3
+    procps
   ];
 }

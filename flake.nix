@@ -488,6 +488,8 @@
               coreutils
               git
               gnused
+              openssh
+              sshpass
             ];
             text = ''
               export NANOKVM_USB_OLED_TOP="''${NANOKVM_USB_OLED_TOP:-${usbOledTop}/bin/usb-oled-top}"
