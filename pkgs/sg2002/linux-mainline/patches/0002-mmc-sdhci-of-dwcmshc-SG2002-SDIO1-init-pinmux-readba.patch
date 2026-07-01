@@ -26,6 +26,18 @@ handles everything the vendor 5.10 kernel does in-SoC-init:
 - on reset, set MSHC_CTRL bits 8/9/16 when the FLAG_CV18XX_SDIO1 flag is
   set by clkgen programming, enabling the 1.8V-ready + latched-output
   paths the vendor driver hardcodes
+- optionally set the vendor MSHC_CTRL bits 8/9 independently via
+  sophgo,mshc-ctrl-8-9 for SD0 boards that need the same latched-output
+  path without the SDIO1-only bit 16
+- optionally set the vendor MSHC_CTRL bit 16 independently via
+  sophgo,mshc-ctrl-16 for SDIO1 boards
+- optionally clear MSHC_CTRL bits via sophgo,mshc-ctrl-clear for
+  board-level SD0 signal timing experiments
+- optionally override CV18XX_PHY_TX_RX_DLY via sophgo,phy-tx-rx-dly for
+  board-level SD0 signal timing experiments
+- optionally clear CV18XX_PHY_CONFIG bits via sophgo,phy-config-clear
+- optionally restore the SD0 top-level power switch via
+  sophgo,sd-pwrsw-ctrl-reg before sdhci_add_host()
 
 All of the new DT properties are read via device_property_read_u32 so
 they're optional: if a board's DTS doesn't set them, the corresponding
@@ -36,8 +48,8 @@ Nano's SDIO1 bus at 50 MHz.
 
 Signed-off-by: George Watson <george@hellas.ai>
 ---
- drivers/mmc/host/sdhci-of-dwcmshc.c | 166 ++++++++++++++++++++++++++++
- 1 file changed, 166 insertions(+)
+ drivers/mmc/host/sdhci-of-dwcmshc.c | 194 ++++++++++++++++++++++++++++
+ 1 file changed, 194 insertions(+)
 
 diff --git a/drivers/mmc/host/sdhci-of-dwcmshc.c b/drivers/mmc/host/sdhci-of-dwcmshc.c
 index 2b75a36c0..be4482874 100644
@@ -52,15 +64,29 @@ index 2b75a36c0..be4482874 100644
  #include "sdhci-pltfm.h"
  #include "cqhci.h"
  #include "sdhci-cqhci.h"
-@@ -215,6 +217,7 @@
+@@ -215,6 +217,11 @@
   */
  #define DLL_ERROR_STS			BIT(1)
  
-+#define FLAG_CV18XX_SDIO1		BIT(2)
++#define FLAG_CV18XX_MSHC_CTRL_8_9	BIT(2)
++#define FLAG_CV18XX_MSHC_CTRL_16	BIT(3)
++#define FLAG_CV18XX_PHY_TX_RX_DLY	BIT(4)
++#define FLAG_CV18XX_PHY_CONFIG_CLEAR	BIT(5)
++#define FLAG_CV18XX_MSHC_CTRL_CLEAR	BIT(6)
  #define FLAG_IO_FIXED_1V8	BIT(0)
  
  #define BOUNDARY_OK(addr, len) \
-@@ -1030,6 +1033,166 @@ static int th1520_init(struct device *dev,
+@@ -304,6 +307,9 @@ struct dwcmshc_priv {
+ 	void *priv; /* pointer to SoC private stuff */
+ 	u16 delay_line;
+ 	u16 flags;
++	u32 cv18xx_phy_tx_rx_dly;
++	u32 cv18xx_phy_config_clear;
++	u32 cv18xx_mshc_ctrl_clear;
+ };
+ 
+ struct dwcmshc_pltfm_data {
+@@ -1030,6 +1036,212 @@ static int th1520_init(struct device *dev,
  	return 0;
  }
  
@@ -82,6 +108,7 @@ index 2b75a36c0..be4482874 100644
 +	struct gpio_desc *wifi_pwr;
 +	u32 pll_reg_addr, pll_div, bypass_reg_addr, bypass_bit;
 +	u32 rtc2ap_reg, pad_cfg_reg, wifi_pinmux_reg;
++	u32 sd_pwrsw_reg, sd_pwrsw_val;
 +	int ret;
 +
 +	rst = devm_reset_control_array_get_optional_exclusive(dev);
@@ -111,6 +138,22 @@ index 2b75a36c0..be4482874 100644
 +		}
 +	}
 +
++	if (!device_property_read_u32(dev, "sophgo,sd-pwrsw-ctrl-reg",
++				      &sd_pwrsw_reg)) {
++		void __iomem *r = ioremap(sd_pwrsw_reg, 4);
++		if (r) {
++			u32 before = readl(r);
++
++			sd_pwrsw_val = 0x9;
++			device_property_read_u32(dev, "sophgo,sd-pwrsw-ctrl-value",
++						 &sd_pwrsw_val);
++			writel((before & 0xfffffff0) | (sd_pwrsw_val & 0xf), r);
++			dev_info(dev, "cv18xx: SD PWRSW 0x%08x: 0x%08x -> 0x%08x\n",
++				 sd_pwrsw_reg, before, readl(r));
++			iounmap(r);
++		}
++	}
++
 +	if (!device_property_read_u32(dev, "sophgo,sdio-clkgen-pll-reg",
 +				      &pll_reg_addr) &&
 +	    !device_property_read_u32(dev, "sophgo,sdio-clkgen-pll-div",
@@ -122,10 +165,12 @@ index 2b75a36c0..be4482874 100644
 +		void __iomem *clkgen = ioremap(0x03002000, 0x100);
 +		if (clkgen)
 +			dev_info(dev,
-+				 "cv18xx: CLKGEN BEFORE +000=0x%08x +020=0x%08x +030=0x%08x +07C=0x%08x\n",
++				 "cv18xx: CLKGEN BEFORE +000=0x%08x +020=0x%08x +030=0x%08x +070=0x%08x +074=0x%08x +07C=0x%08x\n",
 +				 readl(clkgen + 0x000),
 +				 readl(clkgen + 0x020),
 +				 readl(clkgen + 0x030),
++				 readl(clkgen + 0x070),
++				 readl(clkgen + 0x074),
 +				 readl(clkgen + 0x07C));
 +
 +		{
@@ -153,15 +198,42 @@ index 2b75a36c0..be4482874 100644
 +
 +		if (clkgen) {
 +			dev_info(dev,
-+				 "cv18xx: CLKGEN AFTER  +000=0x%08x +020=0x%08x +030=0x%08x +07C=0x%08x\n",
++				 "cv18xx: CLKGEN AFTER  +000=0x%08x +020=0x%08x +030=0x%08x +070=0x%08x +074=0x%08x +07C=0x%08x\n",
 +				 readl(clkgen + 0x000),
 +				 readl(clkgen + 0x020),
 +				 readl(clkgen + 0x030),
++				 readl(clkgen + 0x070),
++				 readl(clkgen + 0x074),
 +				 readl(clkgen + 0x07C));
 +			iounmap(clkgen);
 +		}
++	}
 +
-+		dwc_priv->flags |= FLAG_CV18XX_SDIO1;
++	if (device_property_read_bool(dev, "sophgo,mshc-ctrl-8-9"))
++		dwc_priv->flags |= FLAG_CV18XX_MSHC_CTRL_8_9;
++
++	if (device_property_read_bool(dev, "sophgo,mshc-ctrl-16"))
++		dwc_priv->flags |= FLAG_CV18XX_MSHC_CTRL_16;
++
++	if (!device_property_read_u32(dev, "sophgo,mshc-ctrl-clear",
++				      &dwc_priv->cv18xx_mshc_ctrl_clear)) {
++		dwc_priv->flags |= FLAG_CV18XX_MSHC_CTRL_CLEAR;
++		dev_info(dev, "cv18xx: MSHC_CTRL clear mask 0x%08x\n",
++			 dwc_priv->cv18xx_mshc_ctrl_clear);
++	}
++
++	if (!device_property_read_u32(dev, "sophgo,phy-tx-rx-dly",
++				      &dwc_priv->cv18xx_phy_tx_rx_dly)) {
++		dwc_priv->flags |= FLAG_CV18XX_PHY_TX_RX_DLY;
++		dev_info(dev, "cv18xx: PHY_TX_RX_DLY override 0x%08x\n",
++			 dwc_priv->cv18xx_phy_tx_rx_dly);
++	}
++
++	if (!device_property_read_u32(dev, "sophgo,phy-config-clear",
++				      &dwc_priv->cv18xx_phy_config_clear)) {
++		dwc_priv->flags |= FLAG_CV18XX_PHY_CONFIG_CLEAR;
++		dev_info(dev, "cv18xx: PHY_CONFIG clear mask 0x%08x\n",
++			 dwc_priv->cv18xx_phy_config_clear);
 +	}
 +
 +	{
@@ -227,16 +299,37 @@ index 2b75a36c0..be4482874 100644
  static void cv18xx_sdhci_reset(struct sdhci_host *host, u8 mask)
  {
  	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
-@@ -1046,6 +1209,8 @@ static void cv18xx_sdhci_reset(struct sdhci_host *host, u8 mask)
+@@ -1046,6 +1219,12 @@ static void cv18xx_sdhci_reset(struct sdhci_host *host, u8 mask)
  
  	val = sdhci_readl(host, priv->vendor_specific_area1 + CV18XX_SDHCI_MSHC_CTRL);
  	val |= CV18XX_LATANCY_1T;
-+	if (priv->flags & FLAG_CV18XX_SDIO1)
-+		val |= BIT(8) | BIT(9) | BIT(16);
++	if (priv->flags & FLAG_CV18XX_MSHC_CTRL_8_9)
++		val |= BIT(8) | BIT(9);
++	if (priv->flags & FLAG_CV18XX_MSHC_CTRL_16)
++		val |= BIT(16);
++	if (priv->flags & FLAG_CV18XX_MSHC_CTRL_CLEAR)
++		val &= ~priv->cv18xx_mshc_ctrl_clear;
  	sdhci_writel(host, val, priv->vendor_specific_area1 + CV18XX_SDHCI_MSHC_CTRL);
  
  	val = sdhci_readl(host, priv->vendor_specific_area1 + CV18XX_SDHCI_PHY_CONFIG);
-@@ -1812,6 +1977,7 @@ static const struct dwcmshc_pltfm_data sdhci_dwcmshc_cv18xx_pdata = {
+@@ -1051,3 +1227,5 @@ static void cv18xx_sdhci_reset(struct sdhci_host *host, u8 mask)
+ 	val |= CV18XX_PHY_TX_BPS;
++	if (priv->flags & FLAG_CV18XX_PHY_CONFIG_CLEAR)
++		val &= ~priv->cv18xx_phy_config_clear;
+ 	sdhci_writel(host, val, priv->vendor_specific_area1 + CV18XX_SDHCI_PHY_CONFIG);
+ 
+@@ -1054,8 +1230,10 @@ static void cv18xx_sdhci_reset(struct sdhci_host *host, u8 mask)
+ 	val =  (FIELD_PREP(CV18XX_PHY_TX_DLY_MSK, 0) |
+ 		FIELD_PREP(CV18XX_PHY_TX_SRC_MSK, CV18XX_PHY_TX_SRC_INVERT_CLK_TX) |
+ 		FIELD_PREP(CV18XX_PHY_RX_DLY_MSK, 0) |
+ 		FIELD_PREP(CV18XX_PHY_RX_SRC_MSK, CV18XX_PHY_RX_SRC_INVERT_RX_CLK));
++	if (priv->flags & FLAG_CV18XX_PHY_TX_RX_DLY)
++		val = priv->cv18xx_phy_tx_rx_dly;
+ 	sdhci_writel(host, val, priv->vendor_specific_area1 + CV18XX_SDHCI_PHY_TX_RX_DLY);
+ }
+ 
+ static void cv18xx_sdhci_set_tap(struct sdhci_host *host, int tap)
+@@ -1812,6 +1983,7 @@ static const struct dwcmshc_pltfm_data sdhci_dwcmshc_cv18xx_pdata = {
  		.quirks = SDHCI_QUIRK_CAP_CLOCK_BASE_BROKEN,
  		.quirks2 = SDHCI_QUIRK2_PRESET_VALUE_BROKEN,
  	},
@@ -246,4 +339,3 @@ index 2b75a36c0..be4482874 100644
  static const struct dwcmshc_pltfm_data sdhci_dwcmshc_sg2042_pdata = {
 -- 
 2.53.0
-

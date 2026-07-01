@@ -1,12 +1,9 @@
-# CDC-ECM (or RNDIS) + CDC-ACM composite USB gadget, brought up from
-# the systemd initrd. Pair with includes/usb-recovery.nix or
-# includes/usb-live.nix (anything that keeps the gadget service alive
-# in stage-1).
+# CDC-ECM (or RNDIS/NCM) + CDC-ACM composite USB gadget.
 #
-# net/usb0 gets a static IP on 10.55.0.1/24; ACM exposes /dev/ttyGS0.
-# When `sg2002.usbGadget.network.enable = false`, the net function is
-# dropped and ACM is left alone — lets the kernel route console output
-# to the ACM port when combined with `console=ttyGS0,…` on the cmdline.
+# The initrd can expose the network function for recovery/live images
+# that need USB networking before root is mounted. Normal SD-card boots
+# should leave initrd networking off and let stage 2 recreate the gadget;
+# networkd then owns usb0 like every other stage-2 interface.
 #
 # `sg2002.usbGadget.network.transport` picks the framing:
 #   - "ecm"   — vendor-neutral CDC-ECM. Linux `cdc_ether` driver. Vanilla
@@ -25,13 +22,27 @@
   cfg = config.sg2002;
   gadgetCfg = cfg.usbGadget;
   networkEnable = gadgetCfg.network.enable;
+  initrdNetworkEnable = gadgetCfg.initrd.network.enable;
   transport = gadgetCfg.network.transport;
   netFn = "${transport}.usb0"; # configfs path component
   addOtgFlip = cfg.kernel == "vendor";
+  servicePath = with pkgs; [
+    bash
+    coreutils
+    findutils
+    gnugrep
+  ];
 
-  setup = pkgs.writeShellScript "usb-gadget-setup-initrd" ''
+  mkSetup = setupNetwork:
+    pkgs.writeShellScript "usb-gadget-setup-${if setupNetwork then transport else "acm"}" ''
     set -eu
     G=/sys/kernel/config/usb_gadget/sg2002
+
+    for udc in /sys/kernel/config/usb_gadget/*/UDC; do
+      [ -e "$udc" ] || continue
+      printf '\n' > "$udc" 2>/dev/null || true
+    done
+
     mkdir -p $G
 
     echo 0x1d6b > $G/idVendor
@@ -40,35 +51,36 @@
     echo 0x0200 > $G/bcdUSB
 
     mkdir -p $G/strings/0x409
-    echo "LicheeRV Nano (NixOS)" > $G/strings/0x409/product
-    echo "Sipeed"                > $G/strings/0x409/manufacturer
-    echo "sg2002-0001"           > $G/strings/0x409/serialnumber
+    echo "${gadgetCfg.product}"      > $G/strings/0x409/product
+    echo "${gadgetCfg.manufacturer}" > $G/strings/0x409/manufacturer
+    echo "${gadgetCfg.serial}"       > $G/strings/0x409/serialnumber
 
-    ${lib.optionalString networkEnable ''
+    ${lib.optionalString setupNetwork ''
       mkdir -p "$G/functions/${netFn}"
       echo ${protocol.targetMac} > "$G/functions/${netFn}/dev_addr"
       echo ${protocol.hostMac}   > "$G/functions/${netFn}/host_addr"
     ''}
 
     mkdir -p $G/functions/acm.GS0
-    ${lib.optionalString (!networkEnable) ''
-      # Diagnostic mode: route the kernel console to this ACM port.
-      # Requires CONFIG_U_SERIAL_CONSOLE=y and `console=ttyGS0,…` on
-      # the kernel cmdline.
-      echo 1 > $G/functions/acm.GS0/console
+    ${lib.optionalString gadgetCfg.console.enable ''
+      # Route the kernel console to this ACM port when the kernel
+      # exposes the configfs knob. Requires `console=ttyGS0,...`.
+      if [ -e "$G/functions/acm.GS0/console" ]; then
+        echo 1 > "$G/functions/acm.GS0/console"
+      fi
     ''}
 
     mkdir -p $G/configs/c.1/strings/0x409
     echo "${
-      if networkEnable
+      if setupNetwork
       then "${lib.toUpper transport} + ACM"
       else "ACM"
     }" \
       > $G/configs/c.1/strings/0x409/configuration
     echo 250 > $G/configs/c.1/MaxPower
 
-    ${lib.optionalString networkEnable ''ln -s "$G/functions/${netFn}" "$G/configs/c.1/"''}
-    ln -s $G/functions/acm.GS0 $G/configs/c.1/
+    ${lib.optionalString setupNetwork ''[ -e "$G/configs/c.1/${netFn}" ] || ln -s "$G/functions/${netFn}" "$G/configs/c.1/"''}
+    [ -e "$G/configs/c.1/acm.GS0" ] || ln -s $G/functions/acm.GS0 $G/configs/c.1/
 
     # Bind to the first available UDC (SG2002 has exactly one).
     # Poll for it — on the vendor kernel UDC registration is async
@@ -85,20 +97,26 @@
     echo "$udc" > $G/UDC
   '';
 
-  teardown = pkgs.writeShellScript "usb-gadget-teardown-initrd" ''
+  mkTeardown = setupNetwork:
+    pkgs.writeShellScript "usb-gadget-teardown-${if setupNetwork then transport else "acm"}" ''
     set -eu
     G=/sys/kernel/config/usb_gadget/sg2002
     [ -d $G ] || exit 0
     echo "" > $G/UDC || true
-    ${lib.optionalString networkEnable ''rm -f "$G/configs/c.1/${netFn}"''}
+    ${lib.optionalString setupNetwork ''rm -f "$G/configs/c.1/${netFn}"''}
     rm -f $G/configs/c.1/acm.GS0
     rmdir $G/configs/c.1/strings/0x409 || true
     rmdir $G/configs/c.1               || true
-    ${lib.optionalString networkEnable ''rmdir "$G/functions/${netFn}" || true''}
+    ${lib.optionalString setupNetwork ''rmdir "$G/functions/${netFn}" || true''}
     rmdir $G/functions/acm.GS0         || true
     rmdir $G/strings/0x409             || true
     rmdir $G                           || true
   '';
+
+  setupInitrd = mkSetup initrdNetworkEnable;
+  teardownInitrd = mkTeardown initrdNetworkEnable;
+  setupStage2 = mkSetup networkEnable;
+  teardownStage2 = mkTeardown networkEnable;
 
   otgFlip = pkgs.writeShellScript "usb-gadget-otg-flip" ''
     set -eu
@@ -124,7 +142,7 @@
     exit 1
   '';
 
-  serviceDef = {
+  mkServiceDef = setup: teardown: {
     description = "Bring up CDC-ECM + CDC-ACM composite USB gadget";
     wantedBy = ["initrd.target"];
     before = ["network-pre.target"];
@@ -147,6 +165,7 @@
       ExecStart = setup;
       ExecStop = teardown;
     };
+    path = servicePath;
   };
 
   otgDef = {
@@ -162,58 +181,55 @@
     };
   };
 
-  networksDef = lib.optionalAttrs networkEnable {
+  mkNetworks = enable:
+    lib.optionalAttrs enable {
     "40-usb0" = {
-      matchConfig.Name = "usb0";
+      matchConfig.MACAddress = protocol.targetMac;
       address = ["${protocol.targetIp}/${protocol.prefix}"];
-      networkConfig.LinkLocalAddressing = "no";
+      networkConfig = {
+        ConfigureWithoutCarrier = true;
+        LinkLocalAddressing = "no";
+      };
+      linkConfig.RequiredForOnline = "no";
     };
   };
+
+  initrdServiceDef = mkServiceDef setupInitrd teardownInitrd;
+  stage2ServiceDef = mkServiceDef setupStage2 teardownStage2;
+  initrdNetworksDef = mkNetworks initrdNetworkEnable;
+  stage2NetworksDef = mkNetworks networkEnable;
 in {
-  options.sg2002.usbGadget.network = {
-    enable = lib.mkOption {
-      type = lib.types.bool;
-      default = true;
-      description = "Include a network function in the gadget. When disabled, only the ACM serial function is exposed — useful for bare-console diagnostic boots.";
-    };
-    transport = lib.mkOption {
-      type = lib.types.enum ["ecm" "rndis" "ncm"];
-      default = "ecm";
-      description = ''
-        USB framing protocol for the gadget's network function. All
-        three use the same `dev_addr`/`host_addr` configfs surface;
-        only the function-driver and frame format differ.
-
-        - "ecm": CDC-ECM (vendor-neutral, vanilla). Linux host binds
-          `cdc_ether`. One Ethernet frame per USB bulk transfer.
-        - "rndis": Microsoft RNDIS. Linux host binds `rndis_host`.
-          Microsoft-style message framing; different f_*-driver code
-          path in dwc2 than ECM.
-        - "ncm": CDC-NCM (Network Control Model). Linux host binds
-          `cdc_ncm`. Aggregates multiple Ethernet frames per USB
-          transfer (NDP — Network Datagram Pointer block). Lowest
-          per-frame overhead of the three for high-throughput
-          traffic.
-
-        Try all three under NBD load; the answer's empirical.
-      '';
-    };
-  };
+  imports = [./sg2002-usb-gadget-options.nix];
 
   config = lib.mkMerge [
     {
-      boot.initrd.availableKernelModules = lib.mkForce [
+      sg2002.initrd.pruneKernelModules = true;
+      sg2002.initrd.availableKernelModules = [
         "libcomposite"
-        "usb_f_${transport}"
         "usb_f_acm"
         "configfs"
-      ];
-      boot.initrd.kernelModules = lib.mkForce ["libcomposite"];
+      ] ++ lib.optional initrdNetworkEnable "usb_f_${transport}";
+      sg2002.initrd.kernelModules = ["libcomposite"];
 
       boot.initrd.systemd = {
-        services.usb-gadget = serviceDef;
-        network.networks = networksDef;
-        storePaths = [setup teardown];
+        services.usb-gadget = initrdServiceDef;
+        network.networks = initrdNetworksDef;
+        storePaths = [setupInitrd teardownInitrd];
+      };
+
+      systemd = lib.mkIf gadgetCfg.stage2.enable {
+        services = {
+          usb-gadget = stage2ServiceDef // {
+            wantedBy = ["multi-user.target"];
+            before = ["network-pre.target"];
+            wants = ["network-pre.target"];
+            after = ["sys-kernel-config.mount"];
+          };
+        };
+        network = {
+          enable = lib.mkIf networkEnable true;
+          networks = stage2NetworksDef;
+        };
       };
     }
 

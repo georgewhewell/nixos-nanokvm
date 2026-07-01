@@ -36,10 +36,17 @@ buildUBoot {
     CONFIG_CONSOLE_RECORD_OUT_SIZE=0x2000
     CONFIG_CONSOLE_RECORD_IN_SIZE=0x800
     CONFIG_FASTBOOT_CMD_OEM_CONSOLE=y
-    # If distro_bootcmd fails to find extlinux/boot.scr, fall through to
-    # fastboot. A successful SD boot never reaches it; a dead SD boot
-    # lands in fastboot gadget mode (18d1:d00d) — recovery without UART.
-    CONFIG_BOOTCOMMAND="run distro_bootcmd; fastboot usb 0"
+    # SG2002/Sipeed SD images need partition 1 marked active for fip.bin,
+    # while NixOS extlinux lives on the ext4 root partition. U-Boot's distro
+    # scan can stop at the active firmware partition, so try the known NixOS
+    # root partition explicitly before falling back to the generic scan and
+    # then fastboot.
+    CONFIG_BOOTCOMMAND="sysboot mmc 0:2 any 0x80c00000 /boot/extlinux/extlinux.conf; run distro_bootcmd; fastboot usb 0"
+    # MMC command-level tracing into the console record; pr_info/pr_debug
+    # on the mmc init failure paths only compile in at LOGLEVEL>=7, so
+    # without these a failed `mmc dev 0` is completely silent.
+    CONFIG_LOGLEVEL=8
+    CONFIG_MMC_TRACE=y
   '';
 
   # buildUBoot's default is `cat extras >> .config`; olddefconfig then
@@ -51,5 +58,9 @@ buildUBoot {
     ./patches/0002-riscv-dts-sg2002-licheerv-nano-b-add-U-Boot-dtsi-wit.patch
     ./patches/0003-usb-gadget-dwc2_udc_otg-treat-ENOENT-as-no-clocks.patch
     ./patches/0004-usb-gadget-dwc2_udc_otg-lift-ARM-only-gate-drop-asm-.patch
+    # cv1800b SD won't init under our vendor-FSBL FIP because the upstream
+    # MMC driver never programs the cv18xx SD PHY at init (only during
+    # tuning). Port the kernel's PHY setup so the card answers ACMD41.
+    ./patches/0005-mmc-cv1800b_sdhci-program-cv18xx-sd-phy-at-probe.patch
   ];
 }

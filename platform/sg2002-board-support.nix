@@ -17,6 +17,10 @@
   cfg = config.sg2002;
 
   kernelPkg = pkgs."sg2002-kernel-${cfg.kernel}";
+  fipPkg =
+    if cfg.uboot == "mainline"
+    then pkgs.sg2002-fip-mainline-uboot
+    else pkgs.sg2002-fip;
 
   aic8800Pkg =
     if !cfg.wifi.enable
@@ -60,6 +64,20 @@ in {
       type = types.enum ["mainline" "vendor"];
       default = "mainline";
       description = "Which U-Boot/FIP to install on the firmware partition.";
+    };
+
+    fdt = mkOption {
+      type = types.path;
+      description = ''
+        Device-tree blob this board boots. Single source of truth shared
+        by the vendor-FIT SD path (modules/sg2002-vendor-fit.nix) and the
+        USB boot-fit / kexec artifacts (lib/artifacts.nix) — neither
+        re-derives the DTB itself anymore.
+
+        The platform sets a sensible default per kernel; feature modules
+        (WiFi, OLED) and carrier boards (NanoKVM-PCIe ethernet) override
+        it, lowest-priority-wins so a carrier board beats a feature mixin.
+      '';
     };
 
     wifi = {
@@ -106,6 +124,27 @@ in {
     tuning.enable =
       mkEnableOption "SD-longevity and low-RAM defaults (noatime, zram in stage-2, journald volatile, no disk swap, docs off)"
       // {default = true;};
+
+    initrd = {
+      pruneKernelModules =
+        mkEnableOption "Use the SG2002-pruned initrd kernel module lists";
+      availableKernelModules = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = ''
+          Kernel modules to include in SG2002 initrds when
+          sg2002.initrd.pruneKernelModules is enabled.
+        '';
+      };
+      kernelModules = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = ''
+          Kernel modules to load in SG2002 initrds when
+          sg2002.initrd.pruneKernelModules is enabled.
+        '';
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
@@ -121,12 +160,23 @@ in {
         }
       ];
 
+      # Default DTB per kernel: vendor uses its gadget DTS; mainline
+      # defaults to the cable-only (no-WiFi) DTB. Feature mixins / carrier
+      # boards override at a higher priority. mkOptionDefault keeps this
+      # below an mkDefault from a mixin.
+      sg2002.fdt = lib.mkOptionDefault (
+        if cfg.kernel == "vendor"
+        then pkgs.sg2002-dtb-vendor-gadget
+        else pkgs.sg2002-dtb-mainline-nowifi
+      );
+
       # sd-image pulls a grab-bag of modules; board doesn't need
       # most, and vendor kernel ships no module tree (modules-shrunk
       # would error out).
       hardware.enableAllHardware = lib.mkForce false;
 
       boot.kernelPackages = pkgs.linuxPackagesFor kernelPkg;
+      system.build.fip = fipPkg;
 
       boot.extraModulePackages = lib.optional (aic8800Pkg != null) aic8800Pkg;
       boot.kernelModules = lib.optionals (aic8800Pkg != null) [
@@ -153,6 +203,13 @@ in {
       networking.useDHCP = false;
       networking.firewall.enable = false;
     }
+
+    (lib.mkIf cfg.initrd.pruneKernelModules {
+      boot.initrd.availableKernelModules =
+        lib.mkForce (lib.unique cfg.initrd.availableKernelModules);
+      boot.initrd.kernelModules =
+        lib.mkForce (lib.unique cfg.initrd.kernelModules);
+    })
 
     (lib.mkIf cfg.tuning.enable {
       # noatime kills per-read timestamp writes; commit=600 extends

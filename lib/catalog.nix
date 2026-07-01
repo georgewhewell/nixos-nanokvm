@@ -21,7 +21,8 @@
 #   artifact     — "kernel-test" | "live" | "debug" | "sd"
 #                  drives which artifact-builder runs.
 #   artifactArgs — key/value extras forwarded to the artifact builder
-#                  (oled, rootfsBindIp, extraBootargs, includeKexec).
+#                  (oled, rootfsBindIp, requireRootfsHostOverride,
+#                  extraBootargs, includeKexec).
 #   liveCfgPath  — `debug` artifacts only: the catalog path that
 #                  supplies the rootfs the debug payload pivots into.
 #
@@ -114,24 +115,68 @@ let
     ];
     modules = [
       ({ ... }: {
-        # In wifi mode the rootfs NBD lives on the LAN — networkd
-        # brings wlan0 up via DHCP and connects to the host's LAN
-        # address. USB-ECM stays up purely for the control plane.
-        # 192.168.23.136 is grw's site-specific LAN address; override
-        # via the `wifiBindIp` field below if needed.
+        # In wifi mode the rootfs NBD lives on the caller's LAN:
+        # networkd brings wlan0 up via DHCP and USB-ECM stays up only
+        # for the control plane. The runner must provide
+        # NANOKVM_NBD_ROOTFS_HOST so this catalog remains site-neutral.
         nanokvm.nbdLive = {
-          host = "192.168.23.136";
           staticIface = null;
         };
       })
     ];
-    artifactArgs.rootfsBindIp = "192.168.23.136";
+    artifactArgs.requireRootfsHostOverride = true;
   };
 
   vendorUsb = {
     # Vendor 5.10 lacks kexec-tools/nbd-client + our nbd patch — drop
     # the kexec runner from the output set. usb-boot still publishes.
     artifactArgs.includeKexec = false;
+  };
+
+  # nanokvm-pcie carrier (ethernet + WiFi + OLED footprint), mirroring
+  # the `lichee` helpers above so PCIe entries stay one-liners too.
+  pcie =
+    kernel: pathTail: attrs:
+    {
+      path = [ "pcie" kernel ] ++ pathTail;
+      boardName = "nanokvm-pcie";
+      inherit kernel;
+    }
+    // attrs;
+
+  pcieLive =
+    kernel: tag: attrs:
+    pcie kernel [ "live" "usb" ] (
+      {
+        profile = "usb-nbd-live";
+        artifact = "live";
+        inherit tag;
+      }
+      // attrs
+    );
+
+  pcieKernelTest = kernel:
+    pcie kernel [ "kernel-test" ] {
+      profile = "usb-kernel-test";
+      artifact = "kernel-test";
+      tag = "kernel-test-pcie-${kernel}";
+    };
+
+  # PCIe-live bring-up extras:
+  #   - WiFi driver only, so wlan0 enumerates and the radio is
+  #     exercisable. Association remains downstream policy.
+  #   - nanokvm-server (the web UI + ATX/GPIO control), which the live
+  #     profile doesn't enable on its own.
+  pcieLiveExtras = {
+    modules = [
+      ({ ... }: {
+        sg2002.wifi.enable = true;
+        services.nanokvm = {
+          enable = true;
+          openFirewall = true;
+        };
+      })
+    ];
   };
 in
 [
@@ -152,13 +197,25 @@ in
   (debug "vendor")
   (live "vendor" "usb" "live-vendor" vendorUsb)
 
-  # ===== nanokvm-pcie / vendor (production SD image) =====
-  {
-    path = [ "pcie" "vendor" "sd" ];
-    boardName = "nanokvm-pcie";
-    kernel = "vendor";
-    profile = "sd-image";
-    # Wifi mixin appended by flake.nix only when wifi.conf exists.
-    artifact = "sd";
-  }
+  # ===== nanokvm-pcie / vendor =====
+  # Production SD image (vendor kernel + vendor-FIT). Network policy
+  # belongs in the downstream config that imports the board module.
+  (pcie "vendor" [ "sd" ] { profile = "sd-image"; artifact = "sd"; })
+  # Initrd-only recovery target using the vendor SDHCI stack. Useful when
+  # mainline can reach USB but cannot enumerate the card.
+  (pcieKernelTest "vendor")
+  # USB-NBD live for hardware bring-up: ethernet (bm-dwmac) + WiFi work
+  # natively off the vendor DTS.
+  (pcieLive "vendor" "live-pcie-vendor" (pcieLiveExtras // vendorUsb))
+
+  # ===== nanokvm-pcie / mainline =====
+  # Initrd-only recovery target for USB/kexec bring-up on the actual PCIe
+  # carrier (same DTB as the SD image, but no stage-2 services).
+  (pcieKernelTest "mainline")
+  # extlinux SD image (mainline U-Boot). Ethernet via stmmac + the
+  # ethernet-enabled DTB; reachable over the USB-ECM gadget too.
+  (pcie "mainline" [ "sd" ] { profile = "sd-image-mainline"; artifact = "sd"; })
+  # USB-NBD live exercising the full PCIe hardware — eth0 (stmmac) and
+  # wlan0 (AIC8800) both come up.
+  (pcieLive "mainline" "live-pcie-mainline" pcieLiveExtras)
 ]

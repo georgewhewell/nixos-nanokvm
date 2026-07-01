@@ -10,12 +10,15 @@
 { config
 , lib
 , pkgs
-, nixpkgs
+, modulesPath
 , rootAuthorizedKeys ? [ ]
 , ...
 }: {
   imports = [
-    "${nixpkgs}/nixos/modules/profiles/image-based-appliance.nix"
+    # `modulesPath` (not the nixpkgs flake input): it resolves at
+    # imports-time without needing specialArgs, which keeps the whole
+    # board module list re-instantiable from `_module.args.modules`.
+    "${modulesPath}/profiles/image-based-appliance.nix"
     ../modules/sg2002-usb-gadget-initrd.nix
     ../modules/usb-nbd-live.nix
   ];

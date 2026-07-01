@@ -19,10 +19,16 @@ reset and phy phandles are intentionally omitted — U-Boot has no cv1800
 clock/reset/phy drivers, and the FSBL has already initialised the USB
 block (the ROM USB download path uses the same IP).
 
+Also mark the removable SD slot `broken-cd`. On the NanoKVM-PCIe
+carrier the controller PRESENT_STATE card-present bit is unreliable
+across power cycles; if U-Boot trusts it, `mmc dev 0` can fail before
+it ever sends commands to the card. Polling mode makes U-Boot attempt
+card init and preserves the fastboot fallback when no card answers.
+
 Signed-off-by: George Watson <george@hellas.ai>
 ---
- .../dts/sg2002-licheerv-nano-b-u-boot.dtsi      | 17 +++++++++++++++++
- 1 file changed, 17 insertions(+)
+ .../dts/sg2002-licheerv-nano-b-u-boot.dtsi      | 37 ++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
  create mode 100644 arch/riscv/dts/sg2002-licheerv-nano-b-u-boot.dtsi
 
 diff --git a/arch/riscv/dts/sg2002-licheerv-nano-b-u-boot.dtsi b/arch/riscv/dts/sg2002-licheerv-nano-b-u-boot.dtsi
@@ -30,15 +36,15 @@ new file mode 100644
 index 00000000..6995d46c
 --- /dev/null
 +++ b/arch/riscv/dts/sg2002-licheerv-nano-b-u-boot.dtsi
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,37 @@
 +// SPDX-License-Identifier: GPL-2.0+
-+// U-Boot overlay: add dwc2 USB node for fastboot gadget.
-+// snps,dwc2 compatible matches U-Boot's dwc2_udc_otg driver.
-+// FSBL already initialized USB clock/phy, so we skip those refs.
++// U-Boot overlay: fastboot gadget plus reliable SD polling.
 +
 +/ {
 +	soc {
 +		usb@4340000 {
++			// snps,dwc2 matches U-Boot's dwc2_udc_otg driver.
++			// FSBL already initialized USB clock/phy, so omit those refs.
 +			compatible = "snps,dwc2";
 +			reg = <0x04340000 0x10000>;
 +			dr_mode = "peripheral";
@@ -48,6 +54,25 @@ index 00000000..6995d46c
 +		};
 +	};
 +};
++
++&sdhci0 {
++	broken-cd;
++	disable-wp;
++	min-frequency = <400000>;
++	// Match the Linux side's proven 25 MHz cap on this carrier; the
++	// default would let U-Boot try 50 MHz high-speed on marginal traces.
++	max-frequency = <25000000>;
++	// Board-level SD0 init consumed by the local cv1800b_sdhci U-Boot
++	// patch. These mirror the Linux DT properties that made the SD slot
++	// reliable there: route clk_sd0 from fpll/4, restore the SD power
++	// switch, and enable the vendor latched-output path bits.
++	sophgo,mshc-ctrl-8-9;
++	sophgo,sdio-clkgen-pll-reg = <0x03002070>;
++	sophgo,sdio-clkgen-pll-div = <0x00040109>;
++	sophgo,sdio-clkgen-bypass-reg = <0x03002030>;
++	sophgo,sdio-clkgen-bypass-bit = <6>;
++	sophgo,sd-pwrsw-ctrl-reg = <0x030001f4>;
++	no-1-8-v;
++};
 -- 
 2.53.0
-

@@ -1,0 +1,177 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NixOS NanoKVM <nanokvm@localhost>
+Date: Mon, 8 Jun 2026 00:00:00 +0200
+Subject: [PATCH] mmc: cv1800b_sdhci: add DT-gated cv18xx SD0 init
+
+The upstream cv1800b_sdhci driver assumes the FSBL left the SD
+controller, clock path and PHY in a usable state. That is not stable on
+the NanoKVM-PCIe SD0 slot when booting a mainline U-Boot FIP: the
+controller probes, but CMD8/CMD55/CMD1 all time out with -110.
+
+Mirror the SG2002 SD0 init already carried by the Linux dwcmshc patch:
+
+  - restore the SD0 top-level power switch
+  - route clk_sd0 from fpll/4 via CLKGEN
+  - set the vendor MSHC_CTRL latency/latched-output bits
+  - program PHY_CONFIG and PHY_TX_RX_DLY before card init
+
+All board-specific pieces are controlled by DT properties so the generic
+cv1800b compatible keeps its old behaviour unless the board asks for the
+extra init.
+---
+ drivers/mmc/cv1800b_sdhci.c | 104 +++++++++++++++++++++++++++++++++++-
+ 1 file changed, 103 insertions(+), 1 deletion(-)
+
+--- a/drivers/mmc/cv1800b_sdhci.c
++++ b/drivers/mmc/cv1800b_sdhci.c
+@@ -6,7 +6,9 @@
+ #include <dm.h>
+ #include <mmc.h>
+ #include <sdhci.h>
++#include <asm/io.h>
+ #include <linux/delay.h>
++#include <log.h>
+ 
+ #define SDHCI_PHY_TX_RX_DLY  0x240
+ #define MMC_MAX_CLOCK        375000000
+@@ -14,6 +16,25 @@
+ 
+ #define PHY_TX_SRC_INVERT  BIT(8)
+ 
++/*
++ * cv18xx SD PHY/board init, ported from the kernel's sdhci-of-dwcmshc
++ * cv18xx_sdhci_reset() plus the local SG2002 SD0 DT-gated init. The
++ * upstream driver only touches PHY_TX_RX_DLY during tuning, which never
++ * runs if card init fails first.
++ */
++#define DWCMSHC_P_VENDOR_AREA1  0xe8
++#define DWCMSHC_AREA1_MASK      0xfff
++#define CV18XX_MSHC_CTRL        0x00
++#define CV18XX_LATANCY_1T       BIT(1)
++#define CV18XX_MSHC_CTRL_8_9    (BIT(8) | BIT(9))
++#define CV18XX_PHY_TX_RX_DLY    0x40
++#define CV18XX_PHY_TX_SRC_INV   BIT(8)
++#define CV18XX_PHY_RX_SRC_INV   BIT(24)
++#define CV18XX_PHY_CONFIG       0x4c
++#define CV18XX_PHY_TX_BPS       BIT(0)
++#define CV18XX_SD_PWRSW_MASK    0xf
++#define CV18XX_SD_PWRSW_DEFAULT 0x9
++
+ struct cv1800b_sdhci_plat {
+ 	struct mmc_config cfg;
+ 	struct mmc mmc;
+@@ -77,6 +98,77 @@ static int cv1800b_sdhci_bind(struct udevice *dev)
+ 	return sdhci_bind(dev, &plat->mmc, &plat->cfg);
+ }
+ 
++static u32 cv1800b_readl_phys(u32 addr)
++{
++	return readl((void *)(ulong)addr);
++}
++
++static void cv1800b_writel_phys(u32 val, u32 addr)
++{
++	writel(val, (void *)(ulong)addr);
++}
++
++static void cv1800b_sdhci_board_init(struct udevice *dev)
++{
++	u32 reg, val, before;
++	u32 pll_reg, pll_div, bypass_reg, bypass_bit;
++
++	if (!dev_read_u32(dev, "sophgo,sd-pwrsw-ctrl-reg", &reg)) {
++		val = dev_read_u32_default(dev, "sophgo,sd-pwrsw-ctrl-value",
++					   CV18XX_SD_PWRSW_DEFAULT);
++		before = cv1800b_readl_phys(reg);
++		cv1800b_writel_phys((before & ~CV18XX_SD_PWRSW_MASK) |
++				    (val & CV18XX_SD_PWRSW_MASK), reg);
++		log_debug("%s: SD PWRSW 0x%08x: 0x%08x -> 0x%08x\n",
++			  dev->name, reg, before, cv1800b_readl_phys(reg));
++	}
++
++	if (!dev_read_u32(dev, "sophgo,sdio-clkgen-pll-reg", &pll_reg) &&
++	    !dev_read_u32(dev, "sophgo,sdio-clkgen-pll-div", &pll_div) &&
++	    !dev_read_u32(dev, "sophgo,sdio-clkgen-bypass-reg", &bypass_reg) &&
++	    !dev_read_u32(dev, "sophgo,sdio-clkgen-bypass-bit", &bypass_bit)) {
++		before = cv1800b_readl_phys(pll_reg);
++		cv1800b_writel_phys(pll_div, pll_reg);
++		log_debug("%s: CLKGEN PLL 0x%08x: 0x%08x -> 0x%08x\n",
++			  dev->name, pll_reg, before, cv1800b_readl_phys(pll_reg));
++
++		before = cv1800b_readl_phys(bypass_reg);
++		cv1800b_writel_phys(before & ~BIT(bypass_bit), bypass_reg);
++		log_debug("%s: CLKGEN BYPASS 0x%08x bit %u: 0x%08x -> 0x%08x\n",
++			  dev->name, bypass_reg, bypass_bit, before,
++			  cv1800b_readl_phys(bypass_reg));
++	}
++}
++
++static void cv1800b_sdhci_phy_init(struct udevice *dev, struct sdhci_host *host)
++{
++	u32 area1, val, mask;
++
++	area1 = sdhci_readl(host, DWCMSHC_P_VENDOR_AREA1) & DWCMSHC_AREA1_MASK;
++
++	val = sdhci_readl(host, area1 + CV18XX_MSHC_CTRL);
++	val |= CV18XX_LATANCY_1T;
++	if (dev_read_bool(dev, "sophgo,mshc-ctrl-8-9"))
++		val |= CV18XX_MSHC_CTRL_8_9;
++	if (!dev_read_u32(dev, "sophgo,mshc-ctrl-clear", &mask))
++		val &= ~mask;
++	sdhci_writel(host, val, area1 + CV18XX_MSHC_CTRL);
++	log_debug("%s: MSHC_CTRL area1=0x%x -> 0x%08x\n",
++		  dev->name, area1, val);
++
++	val = sdhci_readl(host, area1 + CV18XX_PHY_CONFIG);
++	val |= CV18XX_PHY_TX_BPS;
++	if (!dev_read_u32(dev, "sophgo,phy-config-clear", &mask))
++		val &= ~mask;
++	sdhci_writel(host, val, area1 + CV18XX_PHY_CONFIG);
++	log_debug("%s: PHY_CONFIG -> 0x%08x\n", dev->name, val);
++
++	val = dev_read_u32_default(dev, "sophgo,phy-tx-rx-dly",
++				   CV18XX_PHY_TX_SRC_INV | CV18XX_PHY_RX_SRC_INV);
++	sdhci_writel(host, val, area1 + CV18XX_PHY_TX_RX_DLY);
++	log_debug("%s: PHY_TX_RX_DLY -> 0x%08x\n", dev->name, val);
++}
++
+ static int cv1800b_sdhci_probe(struct udevice *dev)
+ {
+ 	struct mmc_uclass_priv *upriv = dev_get_uclass_priv(dev);
+@@ -94,13 +186,29 @@ static int cv1800b_sdhci_probe(struct udevice *dev)
+ 	host->ops = &cv1800b_sdhci_sd_ops;
+ 	host->max_clk = MMC_MAX_CLOCK;
+ 
+-	ret = mmc_of_parse(dev, &plat->cfg);
+-	if (ret)
+-		return ret;
+-
++	cv1800b_sdhci_board_init(dev);
++
+ 	ret = sdhci_setup_cfg(&plat->cfg, host, 0, 200000);
+ 	if (ret)
+ 		return ret;
+ 
+-	return sdhci_probe(dev);
++	/*
++	 * Parse DT after sdhci_setup_cfg() so board constraints such as
++	 * no-1-8-v and max-frequency override the hardware-advertised caps.
++	 */
++	ret = mmc_of_parse(dev, &plat->cfg);
++	if (ret)
++		return ret;
++
++	ret = sdhci_probe(dev);
++	if (ret)
++		return ret;
++
++	/*
++	 * Program the SD PHY now; sdhci_probe() already did RESET_ALL and no
++	 * further full reset happens before card init.
++	 */
++	cv1800b_sdhci_phy_init(dev, host);
++
++	return 0;
+ }
+ 
+ static const struct udevice_id cv1800b_sdhci_match[] = {

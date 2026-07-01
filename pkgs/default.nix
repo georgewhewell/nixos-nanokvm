@@ -24,26 +24,14 @@ let
     then final
     else final.pkgsCross.riscv64;
 
+  mainlineLinuxSource = final.buildPackages.callPackage ./sg2002/linux-mainline/source.nix { };
   dtbMainline = final.buildPackages.callPackage ./sg2002/dtb-mainline {
-    linuxSrc = final.buildPackages.linux_latest.src;
+    linuxSrc = mainlineLinuxSource.src;
   };
   dtbVendor = final.buildPackages.callPackage ./sg2002/dtb-vendor {
     licheerv-nano-build = inputs.licheerv-nano-build;
   };
 
-  # Kernel config + patches for the mainline build. Reused by both
-  # the kernel derivation and the kconfig step (kconfig has to apply
-  # the same patches so olddefconfig doesn't drop symbols touched by
-  # them).
-  mainlineKernelExtras = with lib.kernel; {
-    BLK_DEV_NBD = yes;
-    KEXEC = yes;
-    KEXEC_FILE = yes;
-  };
-  mainlineConfig =
-    (import ./sg2002/linux-mainline/config.nix { inherit lib; })
-    // mainlineKernelExtras;
-  mainlinePatches = (import ./sg2002/linux-mainline/patches.nix).patches;
 in
 {
   # -----------------------------------------------------------------
@@ -103,6 +91,29 @@ in
   # its C++ static constructors SEGV in SAMPLE_COMM_VI_ParseIni when
   # run against a mainline kernel.
   nanokvm-server-nocamera = final.nanokvm-server.override { noCamera = true; };
+
+  # Device server, forced to riscv64. Must be instantiated via
+  # buildPackages.callPackage (build host) with an explicit targetSystem,
+  # NOT `.override` on the cross-spliced pkgs.nanokvm-server — the splice
+  # silently drops override args, so that path builds an x86_64 binary
+  # that dies 203/EXEC on the device. nocamera = pure-Go cross-compile.
+  nanokvm-server-device = final.callPackage ./nanokvm-server {
+    noCamera = true;
+    targetSystem = "riscv64-linux";
+  };
+
+  # Device server with the camera/HDMI capture path compiled in —
+  # the build the vendor-kernel images run. Same forced-riscv64
+  # instantiation rationale as nanokvm-server-device above; the only
+  # difference is noCamera = false, which keeps the kvm_vision cgo
+  # binding (libkvm.so) linked in and ships the vendor dl_lib blobs,
+  # the prebuilt kvm_system binary, and the LT6911 sensor INI. Only
+  # safe with sg2002.kernel = "vendor": libkvm.so's C++ static ctors
+  # SEGV under mainline (see nanokvm-server-nocamera above).
+  nanokvm-server-device-camera = final.callPackage ./nanokvm-server {
+    noCamera = false;
+    targetSystem = "riscv64-linux";
+  };
 
   nbd-client-minimal = final.callPackage ./nbd-client-minimal { };
 
@@ -226,9 +237,8 @@ in
       # loop to `sys.exit(0)` immediately after BREAK. Bytes-for-bytes
       # of FIP go through unchanged; we just skip the dead polling.
       postPatch = ''
-        # The 2nd-stage poll block starts after `BREAK` is sent and
-        # `print("break")` runs. Replace the `while True:` that
-        # follows with `sys.exit(0)`.
+        # Applies the pyserial fast-open / short-timeout / flushOutput-EIO
+        # fixes (and, if ever re-enabled, the 2nd-stage skip).
         python3 ${./sg2002-cv181x-rom-dl-skip-2nd-stage.py} \
           rom_usb_dl/cv181x_rom_usb_download.py
       '';
@@ -251,13 +261,9 @@ in
 
   sg2002-uboot-mainline = cross.callPackage ./sg2002/uboot-mainline { };
 
-  sg2002-kernel-mainline = cross.callPackage ./sg2002/linux-mainline {
-    configfile = final.buildPackages.callPackage ./sg2002/linux-mainline/make-config.nix {
-      src = final.buildPackages.linux_latest.src;
-      config = mainlineConfig;
-      patches = map (p: p.patch) mainlinePatches;
-    };
-  };
+  # Normal nixpkgs kernel + SG2002 patches + structured deltas (see
+  # ./sg2002/linux-mainline/default.nix). No hand-rendered configfile.
+  sg2002-kernel-mainline = cross.callPackage ./sg2002/linux-mainline { };
 
   # Vendor 5.10 tree with NanoKVM extras (NBD, erofs). Built from
   # licheerv-nano-build's vendor kernel tarball; baseExtraConfig is
@@ -287,6 +293,7 @@ in
   sg2002-dtbs-mainline = dtbMainline.dtbs;
   sg2002-dtb-mainline-nowifi = dtbMainline.nowifi;
   sg2002-dtb-mainline-oled = dtbMainline.oled;
+  sg2002-dtb-mainline-pcie = dtbMainline.pcie;
   sg2002-dtb-vendor = dtbVendor.boot;
   sg2002-dtb-vendor-gadget = dtbVendor.gadget;
 

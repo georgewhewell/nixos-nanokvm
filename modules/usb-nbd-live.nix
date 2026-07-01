@@ -418,18 +418,12 @@ in
       };
     };
 
-    boot.initrd.availableKernelModules = lib.mkForce [
+    sg2002.initrd.pruneKernelModules = true;
+    sg2002.initrd.availableKernelModules = [
       "af_packet"
-      "configfs"
       "erofs"
-      "libcomposite"
       "loop"
       "overlay"
-      "usb_f_acm"
-      "usb_f_ecm"
-    ];
-    boot.initrd.kernelModules = lib.mkForce [
-      "libcomposite"
     ];
 
     boot.initrd.network.flushBeforeStage2 = lib.mkForce false;

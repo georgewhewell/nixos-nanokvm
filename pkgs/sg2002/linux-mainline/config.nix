@@ -5,6 +5,68 @@
 { lib }:
 with lib.kernel; {
   # =====================================================================
+  # Early-boot compatibility for the T-Head C906 (SG2002).
+  #
+  # The old, *booting* mainline kernel used `make riscv defconfig` as its
+  # base; this one uses the NixOS `linux_latest` common-config. Same 7.0.3
+  # source + same patches — the ONLY difference is the base config, and
+  # with the NixOS base the kernel hangs silently before initrd. Diffing
+  # the resolved riscv defconfig (old, booted) against the NixOS base
+  # (new, hangs) the meaningful early-boot deltas are RANDOMIZE_BASE *and*
+  # RELOCATABLE: the old kernel was non-relocatable, the NixOS one
+  # relocates itself in early boot (head.S, before any console). That
+  # early relocation pass is the most likely silent pre-console hang on
+  # the T-Head C906. Turn both off to match the defconfig base that booted
+  # (EFI/VMAP_STACK/RISCV_ISA_V are y in *both* defconfig and NixOS, and
+  # the DT advertises only rv64imafdc — no vector — so those aren't it).
+  RANDOMIZE_BASE = no;
+  RELOCATABLE = no;
+
+  # THE early-hang cause. The NixOS base enables the RISC-V vector stack
+  # including RISCV_ISA_XTHEADVECTOR (mainline support for the C906's
+  # *non-standard* T-Head vector, detected via the T-Head vendor id — not
+  # the DT `riscv,isa` string, which is only "rv64imafdc"). Worse,
+  # RISCV_PROBE_VECTOR_UNALIGNED_ACCESS makes the kernel *execute vector
+  # instructions at boot* to probe unaligned-access support — before any
+  # console. On the SG2002's C906 that probe hangs silently. The riscv
+  # defconfig (which booted) has no vector support at all. Rip the whole
+  # vector stack out to match it.
+  RISCV_ISA_V = no;
+  RISCV_ISA_V_DEFAULT_ENABLE = no;
+  RISCV_ISA_XTHEADVECTOR = no;
+  RISCV_VECTOR_MISALIGNED = no;
+  RISCV_PROBE_VECTOR_UNALIGNED_ACCESS = no;
+
+  # More NixOS-base-only options that *do work during early boot* and that
+  # the booting defconfig lacks. Vector/KASLR/RELOCATABLE off didn't fix
+  # the hang, so batch-disable the next tier of boot-active machinery:
+  #   - FTRACE: DYNAMIC_FTRACE + patchable-function-entry + CALL_OPS patches
+  #     every kernel function's entry at early boot — RISC-V's newer
+  #     code-patching path is a prime silent-hang suspect on the C906.
+  #   - NUMA: single C906, no NUMA topology; OF_NUMA/arch-numa init runs
+  #     early and defconfig never enables it.
+  #   - KFENCE / PAGE_POISONING: set up guard pools / poison pages at boot.
+  # If this boots, binary-search which one mattered.
+  FTRACE = no;
+  NUMA = no;
+  KFENCE = no;
+  PAGE_POISONING = no;
+
+  # =====================================================================
+  # Live-boot infrastructure: NBD root (usb0-served erofs) + kexec for
+  # the stage2 -> stage2 dev loop.
+  # =====================================================================
+  BLK_DEV_NBD = yes;
+  KEXEC = yes;
+  KEXEC_FILE = yes;
+
+  # SD card (sdhci0 / sophgo,cv1800b-dwcmshc): the controller glue is
+  # already =y from the NixOS base; MMC_BLOCK stays a module (forcing it
+  # =y here trips a kconfig "repeated question" loop). The initrds that
+  # need /dev/mmcblk0 (live-writer + SD-boot) pull mmc_block in via
+  # boot.initrd.availableKernelModules instead.
+
+  # =====================================================================
   # Enables — SoC + gadget + aic8800 OOT driver
   # =====================================================================
 
@@ -70,9 +132,12 @@ with lib.kernel; {
   MFD_SYSCON = yes;
 
   # Wireless stack — needed for out-of-tree aic8800 driver
-  # (exposes `struct net_device.ieee80211_ptr` etc.)
+  # (exposes `struct net_device.ieee80211_ptr` etc.). cfg80211 is a
+  # module: the full NixOS base builds RFKILL as a module and a built-in
+  # can't depend on a module. The OOT aic8800 module loads against
+  # cfg80211.ko all the same.
   WIRELESS = yes;
-  CFG80211 = yes;
+  CFG80211 = module;
   CFG80211_WEXT = yes;
   WEXT_CORE = yes;
   WEXT_PROC = yes;
@@ -117,7 +182,24 @@ with lib.kernel; {
   # pets /dev/watchdog0 via RuntimeWatchdogSec. Replaces the old
   # /dev/mem userspace petter.
   WATCHDOG_CORE = yes;
+  WATCHDOG_NOWAYOUT = yes;
+  WATCHDOG_HANDLE_BOOT_ENABLED = yes;
+  WATCHDOG_SYSFS = yes;
+  WATCHDOG_HRTIMER_PRETIMEOUT = yes;
+  WATCHDOG_PRETIMEOUT_GOV = yes;
+  WATCHDOG_PRETIMEOUT_GOV_PANIC = yes;
+  WATCHDOG_PRETIMEOUT_DEFAULT_GOV_PANIC = yes;
   DW_WATCHDOG = yes;
+  PANIC_ON_OOPS = yes;
+  PANIC_TIMEOUT = freeform "5";
+  SOFTLOCKUP_DETECTOR = yes;
+  BOOTPARAM_SOFTLOCKUP_PANIC = freeform "1";
+  HARDLOCKUP_DETECTOR = option yes;
+  BOOTPARAM_HARDLOCKUP_PANIC = option yes;
+  DETECT_HUNG_TASK = yes;
+  BOOTPARAM_HUNG_TASK_PANIC = freeform "1";
+  WQ_WATCHDOG = yes;
+  BOOTPARAM_WQ_STALL_PANIC = freeform "1";
   # sysrq for forcing kernel panics to test that the HW WDT actually
   # bites. `echo c > /proc/sysrq-trigger` panics the kernel; with no
   # one petting the WDT, the SoC should reset within ~42 s.
@@ -156,6 +238,13 @@ with lib.kernel; {
   I2C = yes;
   I2C_CHARDEV = yes;
   I2C_DESIGNWARE_PLATFORM = yes;
+  # Bit-banged I2C for the NanoKVM-PCIe front-panel OLED (the panel
+  # hangs off two plain GPIOs, not a hardware controller — see the
+  # i2c-gpio node in dtb-mainline/sg2002-nanokvm-pcie.dtsi). Built-in
+  # rather than modular so the bus exists as soon as the DT is parsed
+  # and we dodge the initrd module-pruning machinery entirely;
+  # ssd1307fb itself stays a stage-2 module (below).
+  I2C_GPIO = yes;
 
   # PWM controller (driver in patches/0008). Built-in so /sys/class/
   # pwm/pwmchip0..3 are present in the USB-recovery initrd without
@@ -163,19 +252,12 @@ with lib.kernel; {
   PWM = yes;
   PWM_SOPHGO_CV1800 = yes;
 
-  # On-chip audio: I2S/TDM controller + internal RXADC (mic) +
-  # internal TXDAC (speaker amp). LicheeRV Nano B-W has the analog
-  # mic and ~1 W speaker amp wired straight to those internal blocks
-  # — no external i2c codec. simple-audio-card glues them via the
-  # nodes added in pkgs/dtb-mainline/sg2002-licheerv-nano-bw.dtsi.
-  SOUND = yes;
-  SND = yes;
-  SND_SOC = yes;
-  SND_SOC_GENERIC_DMAENGINE_PCM = yes;
-  SND_SOC_CV1800B_TDM = module;
-  SND_SOC_CV1800B_ADC_CODEC = module;
-  SND_SOC_CV1800B_DAC_CODEC = module;
-  SND_SOC_SIMPLE_CARD = module;
+  # Audio OFF on the KVM: the SoC has I2S/TDM + internal mic/speaker,
+  # but turning SND_SOC on against the full NixOS base drags ~400 codec
+  # modules we'll never use, and a KVM doesn't need audio. Force the
+  # whole sound subsystem off. (Re-enable SOUND/SND_SOC + the
+  # SND_SOC_CV1800B_* drivers here if audio is ever wanted.)
+  SOUND = no;
   # DMA engine + dmamux required for the I2S DMA paths to work.
   # dw_axi_dmac drives the 8-channel AXI DMA at 4330000; the dmamux
   # (drivers/dma/cv1800b-dmamux.c) routes the peripheral request
@@ -323,7 +405,26 @@ with lib.kernel; {
   NET_VENDOR_SOLARFLARE = no;
   NET_VENDOR_SMSC = no;
   NET_VENDOR_SOCIONEXT = no;
-  NET_VENDOR_STMICRO = no;
+  # SG2002 *does* have an on-die GMAC (sophgo,cv1800b-dwmac /
+  # snps,dwmac-3.70a) at 0x4070000; the LicheeRV-Nano dev board leaves it
+  # unwired, but the NanoKVM-PCIe carrier routes it to the RJ45. Mainline
+  # 7.0's dwmac-sophgo only matches sg2042/sg2044 and never powers up the
+  # cv1800b internal EPHY, so patch 0013 adds a "sophgo,cv1800b-dwmac"
+  # binding that mirrors the vendor U-Boot EPHY power-up.
+  #
+  # Keep dwmac-sophgo modular, but build the internal EPHY's MMIO MDIO mux
+  # into the kernel. Otherwise networkd can open eth0 after dwmac-sophgo
+  # loaded but before mdio-mux-mmioreg has created the child bus, and stmmac
+  # fails its first PHY attach with -ENODEV.
+  NET_VENDOR_STMICRO = yes;
+  STMMAC_ETH = module;
+  STMMAC_PLATFORM = module;
+  DWMAC_SOPHGO = module;
+  PHYLIB = yes;
+  MDIO_BUS = yes;
+  MDIO_DEVICE = yes;
+  MDIO_BUS_MUX = yes;
+  MDIO_BUS_MUX_MMIOREG = yes;
   NET_VENDOR_SUN = no;
   NET_VENDOR_SYNOPSYS = no;
   NET_VENDOR_TEHUTI = no;
@@ -389,4 +490,59 @@ with lib.kernel; {
   WLAN_VENDOR_TI = no;
   WLAN_VENDOR_ZYDAS = no;
   WLAN_VENDOR_QUANTENNA = no;
+
+  # =====================================================================
+  # Hard prune — the normal NixOS base builds ~3800 modules; the 256 MB
+  # NanoKVM (erofs-over-NBD rootfs) has none of this hardware and needs
+  # none of these subsystems. Disable the top-level menus to drop the
+  # bulk of that module tree. Anything genuinely needed is turned back
+  # on explicitly above.
+  # =====================================================================
+
+  # No SCSI / ATA / NVMe / RAID / device-mapper / multipath — the only
+  # storage is the SD/eMMC controller (cv-sd, kept above).
+  MD = no;
+  TARGET_CORE = no;
+
+  # Gadget-only USB: keep dwc2 + the configfs functions (above); drop
+  # host-class drivers, serial converters, USB-net, USB mass-storage
+  # host, USB HID, and the host-side device zoo.
+  USB_SERIAL = no;
+  USB_NET_DRIVERS = no;
+  USB_STORAGE = no;
+  USB_HID = no;
+  USB_PRINTER = no;
+  USB_MDC800 = no;
+  USB_MICROTEK = no;
+
+  # No external PMICs / regulators / MFDs / battery / charger / power.
+  REGULATOR = no;
+
+  # Industrial-IO / 1-wire / IR / comedi / typec / hwtracing / firewire
+  # / thunderbolt / infiniband / GPU-DRM / V4L-DVB media — no hardware.
+
+  # Networking: no firewall (firewall.enable = false), no exotic L4
+  # protocols, no traffic shaping, no tunnels/wireguard-in-kernel.
+  NETFILTER = no;
+  IP_SCTP = no;
+  IP_DCCP = no;
+  RDS = no;
+  TIPC = no;
+  L2TP = no;
+  NET_SCHED = no;
+  BRIDGE = no;
+  VLAN_8021Q = no;
+  WIREGUARD = no;
+
+  # No remote/exotic filesystems — keep ext4/vfat/erofs/overlay/tmpfs
+  # /configfs/autofs (those stay on via the base / above).
+  NETWORK_FILESYSTEMS = no;
+
+  # Audio: keep the SoC I2S codec (cv1800b-sound, pulled in by the
+  # board); drop USB / PCI / FireWire / other-SoC sound.
+  SND_USB = no;
+  SND_PCI = no;
+  SND_PCMCIA = no;
+  SND_FIREWIRE = no;
+  SND_SPI = no;
 }

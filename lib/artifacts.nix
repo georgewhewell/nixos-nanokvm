@@ -4,7 +4,7 @@
 #                          (see lib/host-prelude.nix).
 #
 # Returns a function `pkgs -> { mkBootFit, mkKexecPayload, mkLiveRootfs,
-# mkKexecRunner, mkUsbBootRunner, mkBoardFdt, sg2002OledOverlayDtbo,
+# mkKexecRunner, mkUsbBootRunner, sg2002OledOverlayDtbo,
 # kernelTestBootargs, mkLiveBootargs }`.
 #
 # Split out of flake.nix so flake.nix stays roughly the size of an
@@ -15,22 +15,10 @@
 }: pkgs:
 let
   # Select the board DTB for direct FIT boot and kexec payloads. The
-  # wifi variant needs sdhci1 wired up (AIC8800 lives on it); the OLED
-  # variant disables sdhci1 and wires those pads to IIC1.
-  mkBoardFdt =
-    { board
-    , kernel
-    , variant ? null
-    ,
-    }:
-    if board == "licheerv" && variant == "wifi"
-    then pkgs.sg2002-dtb-mainline
-    else if board == "licheerv" && variant == "oled"
-    then pkgs.sg2002-dtb-mainline-oled
-    else if kernel == "vendor"
-    then pkgs.sg2002-dtb-vendor-gadget
-    else pkgs.sg2002-dtb-mainline-nowifi;
-
+  # NB: the DTB is no longer chosen here — every board's
+  # `config.sg2002.fdt` is the single source of truth (set by the
+  # platform default + the WiFi/OLED/ethernet modules). mkBootFit and
+  # mkKexecPayload read it straight off the resolved NixOS config.
   mkFeatureBootargs = { oled ? false }:
     lib.optionals oled [
       "fbcon=font:MINI4x6"
@@ -41,14 +29,6 @@ let
     lib.optionals oled [ "nanokvm.kexec_target_overlay=oled" ]
     ++ mkFeatureBootargs { inherit oled; };
 
-  mkFitVariant =
-    { variant ? null
-    , oled ? false
-    ,
-    }:
-    if oled
-    then "oled"
-    else variant;
 
   sg2002OledOverlayDtbo =
     pkgs.runCommand "sg2002-licheerv-nano-oled.dtbo"
@@ -59,21 +39,16 @@ let
     '';
 
   mkBootFit =
-    { board
-    , kernel
-    , profile
+    { profile
     , cfg
     , description
-    , variant ? null
-    , oled ? false
     ,
     }:
     pkgs.sg2002-boot-fit {
       kernel = cfg.config.system.build.kernel;
-      fdt = mkBoardFdt {
-        inherit board kernel;
-        variant = mkFitVariant { inherit variant oled; };
-      };
+      # Single source of truth — the board config already resolved which
+      # DTB to boot (platform default + WiFi/OLED/ethernet modules).
+      fdt = cfg.config.sg2002.fdt;
       initrd = "${cfg.config.system.build.initialRamdisk}/initrd";
       loadAddrs = {
         kernel = "0x80200000";
@@ -104,11 +79,8 @@ let
 
   mkKexecPayload =
     { name
-    , board
-    , kernel
     , cfg
     , rootfsCfg ? cfg
-    , variant ? null
     , oled ? false
     , extraBootargs ? [ ]
     ,
@@ -122,7 +94,7 @@ let
       inherit name;
       kernel = "${cfg.config.system.build.kernel}/Image";
       initrd = "${cfg.config.system.build.initialRamdisk}/initrd";
-      dtb = mkBoardFdt { inherit board kernel variant; };
+      dtb = cfg.config.sg2002.fdt;
       dtbo =
         if oled
         then sg2002OledOverlayDtbo
@@ -137,6 +109,7 @@ let
   mkRootfsRuntimeSetup =
     { label
     , rootfsBindIp ? null
+    , requireRootfsHostOverride ? false
     ,
     }:
     let
@@ -150,6 +123,13 @@ let
         else rootfsBindIp;
     in
     ''
+      ${lib.optionalString requireRootfsHostOverride ''
+        if [ -z "''${NANOKVM_NBD_ROOTFS_HOST:-}" ]; then
+          echo "[${label}] NANOKVM_NBD_ROOTFS_HOST is required for this variant; set it to the host address reachable from the target network" >&2
+          echo "[${label}] optionally set NANOKVM_NBD_ROOTFS_BIND to the local address nbd-server should bind" >&2
+          exit 1
+        fi
+      ''}
       rootfs_host="''${NANOKVM_NBD_ROOTFS_HOST:-${rootfsHostDefault}}"
       rootfs_bind="''${NANOKVM_NBD_ROOTFS_BIND:-${rootfsBindDefault}}"
       rootfs_port_request="''${NANOKVM_NBD_ROOTFS_PORT:-auto}"
@@ -164,6 +144,7 @@ let
     , payload
     , rootfs ? null
     , rootfsBindIp ? null
+    , requireRootfsHostOverride ? false
     , useRunningDtb ? false
     , applyDtbOverlay ? false
     , loadOnly ? false
@@ -281,7 +262,7 @@ let
 
         ${lib.optionalString (rootfs != null) (mkRootfsRuntimeSetup {
           label = "usb-kexec";
-          inherit rootfsBindIp;
+          inherit rootfsBindIp requireRootfsHostOverride;
         })}
 
         configure_host_iface usb-kexec >/dev/null || exit 1
@@ -322,6 +303,7 @@ let
     , rootfs ? null
     , bootargs
     , rootfsBindIp ? null
+    , requireRootfsHostOverride ? false
     , attachPicocom ? false
     , waitForSsh ? false
     , onShellDetachCommand ? null
@@ -375,101 +357,6 @@ let
         }
 
         start_rootfs_nbd || exit 1
-      '';
-      # Host-side host-key handling. Only relevant when the variant
-      # actually runs stage 2 sshd (waitForSsh path). Keeps personal
-      # pubkeys out of the nix store AND skips the SG2002's ~60 s
-      # wall-clock sshd-keygen by pre-installing keys into the
-      # initrd's /etc-overlay upperdir.
-      #
-      # Storage: $PWD/.ssh_host_{ed25519,rsa}_key (gitignored).
-      # Reuses on subsequent boots so SSH known_hosts stays stable.
-      # Env knobs:
-      #   NANOKVM_HOST_KEY_DIR — override default ($PWD)
-      #   NANOKVM_HOST_KEY_GENERATE=0 — skip the whole step
-      #   NANOKVM_HOST_KEY_PERSIST=0 — generated keys not written back
-      hostKeysInject = lib.optionalString waitForSsh ''
-        if [ "''${NANOKVM_HOST_KEY_GENERATE:-1}" = 0 ]; then
-          echo "[usb-boot] NANOKVM_HOST_KEY_GENERATE=0, skipping host-key push"
-        else
-          host_key_dir="''${NANOKVM_HOST_KEY_DIR:-$PWD}"
-          host_key_ed="$host_key_dir/.ssh_host_ed25519_key"
-          host_key_rsa="$host_key_dir/.ssh_host_rsa_key"
-          generated_any=0
-          for kt in ed25519 rsa; do
-            kf="$host_key_dir/.ssh_host_''${kt}_key"
-            if [ ! -s "$kf" ] || [ ! -s "$kf.pub" ]; then
-              echo "[usb-boot] generating new host-$kt key at $kf"
-              generated_any=1
-              # ssh-keygen exits before printing newline on -q sometimes;
-              # force file create and capture errors.
-              rm -f "$kf" "$kf.pub"
-              ssh-keygen -t "$kt" -N "" -C "nanokvm-host-key" -f "$kf" -q
-              # The runner is usually invoked via `sudo` (for fastboot
-              # USB access), so newly created files end up owned by
-              # root. If $SUDO_USER is set, hand them back so the dev
-              # can manage them normally.
-              if [ -n "''${SUDO_USER:-}" ] && [ "$(id -u)" = 0 ]; then
-                chown "$SUDO_USER" "$kf" "$kf.pub" 2>/dev/null || true
-              fi
-            fi
-          done
-          host_key_cleanup=()
-          if [ "$generated_any" = 1 ] \
-              && [ "''${NANOKVM_HOST_KEY_PERSIST:-1}" = 0 ]; then
-            echo "[usb-boot] NANOKVM_HOST_KEY_PERSIST=0; cleaning up generated keys"
-            # Defer cleanup until end of script. Use a bash array (not a
-            # space-joined string) so paths containing spaces don't get
-            # word-split into something like `rm -f /home/grw/my src/...`.
-            host_key_cleanup=("$host_key_ed" "$host_key_ed.pub" "$host_key_rsa" "$host_key_rsa.pub")
-          fi
-
-          echo "[usb-boot] waiting for initrd debug shell on :$nanokvm_port_shell..."
-          shell_ready=0
-          for _ in $(seq 1 120); do
-            if timeout 1 bash -c ":</dev/tcp/$nanokvm_target_ip/$nanokvm_port_shell" 2>/dev/null; then
-              shell_ready=1
-              break
-            fi
-            sleep 0.5
-          done
-          if [ "$shell_ready" != 1 ]; then
-            echo "[usb-boot] WARN: debug shell never opened; skipping host-key push (sshd will keygen on device, ~60 s)"
-          else
-            echo "[usb-boot] pushing host keys via telnet :$nanokvm_port_shell"
-            # The receiver runs as busybox sh in initrd, scripted to wait
-            # for /sysroot/.rw-etc/upper (created by nixos rw-etc.service
-            # before initrd-fs.target) and then drop the keys there. Uses
-            # heredocs with unique markers since keys are multi-line.
-            {
-              printf '%s\n' "for i in \$(seq 1 120); do [ -d /sysroot/.rw-etc/upper ] && break; sleep 0.5; done"
-              printf '%s\n' "if [ ! -d /sysroot/.rw-etc/upper ]; then echo HOSTKEY_NO_UPPER; exit 1; fi"
-              printf '%s\n' "mkdir -p /sysroot/.rw-etc/upper/ssh"
-              printf '%s\n' "umask 077"
-              for spec in "ed25519:$host_key_ed:__NANOKVM_KEY_ED__" \
-                          "ed25519.pub:$host_key_ed.pub:__NANOKVM_KEY_EDPUB__" \
-                          "rsa:$host_key_rsa:__NANOKVM_KEY_RSA__" \
-                          "rsa.pub:$host_key_rsa.pub:__NANOKVM_KEY_RSAPUB__"; do
-                IFS=: read -r suffix src tag <<<"$spec"
-                base="ssh_host_$(echo "$suffix" | sed 's/\.pub/_key.pub/; t; s/$/_key/')"
-                printf '%s\n' "cat > /sysroot/.rw-etc/upper/ssh/$base <<'$tag'"
-                cat "$src"
-                printf '%s\n' "$tag"
-              done
-              printf '%s\n' "chmod 600 /sysroot/.rw-etc/upper/ssh/ssh_host_ed25519_key /sysroot/.rw-etc/upper/ssh/ssh_host_rsa_key"
-              printf '%s\n' "chmod 644 /sysroot/.rw-etc/upper/ssh/ssh_host_ed25519_key.pub /sysroot/.rw-etc/upper/ssh/ssh_host_rsa_key.pub"
-              printf '%s\n' "echo HOSTKEYS_INSTALLED"
-              printf '%s\n' "exit"
-            } | nc -w 20 "$nanokvm_target_ip" "$nanokvm_port_shell" 2>&1 \
-              | sed -u 's/^/[host-keys] /' \
-              | tee /tmp/nanokvm-hostkeys.log >/dev/null
-            if grep -q HOSTKEYS_INSTALLED /tmp/nanokvm-hostkeys.log; then
-              echo "[usb-boot] host keys installed; sshd-keygen will skip on device"
-            else
-              echo "[usb-boot] WARN: host-key push didn't confirm; check /tmp/nanokvm-hostkeys.log"
-            fi
-          fi
-        fi
       '';
       sshWait = lib.optionalString waitForSsh ''
         echo "[usb-boot] waiting for SSH on root@$nanokvm_target_ip..."
@@ -572,7 +459,6 @@ let
         iproute2
         nbd
         netcat-openbsd
-        openssh # ssh-keygen for the host-key generation step
         picocom
         systemd # networkctl for host-side networkd runtime overrides
       ];
@@ -605,7 +491,7 @@ let
         ${lib.optionalString (rootfs != null) ''
           ${mkRootfsRuntimeSetup {
             label = "usb-boot";
-            inherit rootfsBindIp;
+            inherit rootfsBindIp requireRootfsHostOverride;
           }}
           ${rootfsService}
 
@@ -620,17 +506,10 @@ let
 
         start_status_sink usb-boot
 
-        ${hostKeysInject}
-
         ${sshWait}
 
         ${attachTail}
 
-        ${lib.optionalString waitForSsh ''
-          if [ "''${#host_key_cleanup[@]}" -gt 0 ]; then
-            rm -f "''${host_key_cleanup[@]}"
-          fi
-        ''}
       '';
     };
 
@@ -656,7 +535,6 @@ in
     mkLiveRootfs
     mkKexecRunner
     mkUsbBootRunner
-    mkBoardFdt
     sg2002OledOverlayDtbo
     mkFeatureBootargs
     oledBootargs

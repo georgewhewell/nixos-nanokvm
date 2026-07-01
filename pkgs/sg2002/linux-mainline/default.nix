@@ -1,41 +1,47 @@
-# Mainline Linux built from `pkgs.linux_latest.src` with SG2002
-# SoC-support patches layered on top (see ./patches.nix for the queue
-# and ./patches/ for the actual diffs). Each patch should have an
-# `origin` and `upstreamStatus` field.
+# Mainline Linux for the SG2002.
 #
-# linuxManualConfig + a pre-rendered configfile. The configfile is
-# produced by the native side of the overlay via make-config.nix, so
-# kconfig tooling runs under host gcc — not the cross one.
-{ lib
-, linuxManualConfig
-, linux_latest
-, configfile
-, ...
+# This is the *normal* nixpkgs kernel (`linux_latest`, which already
+# carries NixOS's standard structured kernel config) with two things
+# layered on via `.override`:
+#
+#   - kernelPatches  — the SG2002 SoC-support queue (see ./patches.nix).
+#   - structuredExtraConfig — our add/remove deltas (see ./config.nix):
+#     turn ON the SoC drivers + gadget stack + AIC8800 OOT bits, turn
+#     OFF the desktop/server bloat the 256 MB board doesn't want.
+#
+# Replaces the old `linuxManualConfig` + hand-rendered `make defconfig`
+# approach: NixOS's own kernel requirements now come from the base for
+# free, and config.nix only has to express what's SG2002-specific.
+# buildLinux applies the patches before generating the config, so
+# patch-introduced Kconfig symbols referenced in config.nix resolve
+# correctly (the reason the old path needed make-config.nix).
+{
+  lib,
+  fetchurl,
+  linux_latest,
+  # nixpkgs re-.override's kernels with `features` / friends; tolerate
+  # any extra args callPackage / linuxPackagesFor threads through.
+  ...
 }:
-(linuxManualConfig {
-  inherit (linux_latest) version src;
-  inherit configfile;
-  allowImportFromDerivation = true;
-  # Single source of truth; same list also goes through make-config.nix
-  # so olddefconfig sees Kconfig added by these patches.
+let
+  source = import ./source.nix {inherit fetchurl;};
+in
+# Standard nixpkgs riscv64 kernel: buildLinux installs the uncompressed
+# `Image` (kernelFile default) into $out on its own — no compress/install
+# dance needed. We only layer on the SG2002 patch queue + config delta.
+(linux_latest.override {
+  argsOverride = {
+    inherit (source) src version modDirVersion;
+    extraMeta.branch = "7.2-rc";
+  };
+  # config.nix is the authoritative SG2002 delta, so force every entry
+  # over the generic NixOS base (otherwise our `turn off` of e.g. DRM
+  # collides with common-config's `yes` at equal priority).
+  structuredExtraConfig = lib.mapAttrs (_: lib.mkForce) (
+    import ./config.nix {inherit lib;}
+  );
   kernelPatches = (import ./patches.nix).patches;
-}).overrideAttrs (old: {
-  # Empty features flags this as an out-of-tree kernel so NixOS skips
-  # config-option validation (see nixpkgs kernel.nix:505).
-  passthru = (old.passthru or { }) // { features = { }; };
-
-  # RISC-V `make install` hardcodes Image.gz; the build only produces
-  # Image. Compress before install, then copy Image back into $out
-  # (NixOS's kernelFile default is Image). No user-visible compression
-  # happens — it's just a shuffle to satisfy arch/riscv/Makefile.
-  postBuild =
-    (old.postBuild or "")
-    + ''
-      gzip -9 --keep --no-name arch/riscv/boot/Image
-    '';
-  postInstall =
-    (old.postInstall or "")
-    + ''
-      gunzip -c $out/Image.gz > $out/Image
-    '';
+  # We prune hard against the full NixOS config; let olddefconfig drop
+  # options whose deps we turned off instead of failing the build.
+  ignoreConfigErrors = true;
 })

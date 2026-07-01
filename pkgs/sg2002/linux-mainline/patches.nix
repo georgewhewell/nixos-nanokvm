@@ -43,10 +43,6 @@ let
       patch = ./patches/0003-dmaengine-cv1800b-dmamux-fix-channel-allocation-order.patch;
     })
     (patch {
-      name = "dmaengine-dw-axi-dmac-add-cv1800b-support";
-      patch = ./patches/0004-dmaengine-dw-axi-dmac-Add-support-for-CV1800B-DMA.patch;
-    })
-    (patch {
       name = "asoc-cv1800b-sound-adc-init-analog-stage";
       patch = ./patches/0005-ASoC-cv1800b-sound-adc-init-analog-stage.patch;
     })
@@ -77,6 +73,10 @@ let
     (patch {
       name = "fbdev-ssd1307fb-mark-buffer-as-virtual-framebuffer";
       patch = ./patches/0012-fbdev-ssd1307fb-mark-buffer-as-virtual-framebuffer.patch;
+    })
+    (patch {
+      name = "net-stmmac-dwmac-sophgo-add-cv1800b-internal-ephy";
+      patch = ./patches/0013-net-stmmac-dwmac-sophgo-add-cv1800b-internal-EPHY.patch;
     })
   ];
 
@@ -114,8 +114,8 @@ let
     "dmaengine-dw-axi-dmac-add-cv1800b-support" = {
       origin = "linux-next";
       upstreamStatus = "merged";
-      dropWhen = "nixpkgs linux >= the kernel that includes this";
-      notes = "Pair with 0003 — required for I2S capture to function.";
+      dropWhen = "already present in nixpkgs linux 7.1";
+      notes = "Pair with 0003 — required for I2S capture to function. Kept as metadata only because Linux 7.1 already contains this patch.";
     };
     "asoc-cv1800b-sound-adc-init-analog-stage" = {
       origin = "local";
@@ -210,6 +210,25 @@ let
         RAM-backed framebuffer does not set FBINFO_VIRTFB. ssd1307fb
         allocates normal memory and flushes it via deferred I/O, so mark
         it as virtual to avoid alarming boot-time fbcon warnings.
+      '';
+    };
+    "net-stmmac-dwmac-sophgo-add-cv1800b-internal-ephy" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "dwmac-sophgo (or an EPHY power-up in mainline U-Boot) supports the cv1800b/SG2002 internal EPHY";
+      notes = ''
+        Mainline 7.0's dwmac-sophgo only binds sg2042/sg2044. The
+        CV1800B/SG2002 internal 10/100 EPHY needs two things mainline
+        doesn't do: (1) power-up — the vendor U-Boot
+        (board/cvitek/mars/board.c::cv181x_ephy_id_init) releases it from
+        shutdown before Linux; without it PHY attach fails -EINVAL.
+        (2) analog calibration — the vendor PHY driver
+        (drivers/net/phy/cvitek.c::cv182xa_phy_config_init) programs the
+        MLT3/link-pulse/TP-idle/10-100BaseT/AGC/LPF-HPF tables; without
+        it the PHY attaches but never links (carrier 0 with a cable). We
+        do both via MMIO at 0x03009000 from the cv1800b init hook, using
+        non-efuse default trims and the CV181X "mars" LPF/HPF. (Per-chip
+        efuse trimming is skipped — it only tightens signal margins.)
       '';
     };
   };
