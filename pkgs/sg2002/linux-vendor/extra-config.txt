@@ -5,7 +5,17 @@
 # with what the vendor defconfig already had.
 
 # Namespaces / cgroups — systemd won't come up without them.
+# The vendor defconfig has NAMESPACES=y + NET_NS/USER_NS but leaves the
+# UTS/IPC/PID namespaces off. systemd uses all three for per-service
+# sandboxing; without them credential/sandbox setup fails with
+# status=243/CREDENTIALS and core initrd services (tmpfiles-setup-dev,
+# journald, networkd) never start — blocking switch-root. Deps are just
+# NAMESPACES (already =y), so these are safe to force without olddefconfig.
 CONFIG_CGROUPS=y
+CONFIG_NAMESPACES=y
+CONFIG_UTS_NS=y
+CONFIG_IPC_NS=y
+CONFIG_PID_NS=y
 CONFIG_SYSFS=y
 CONFIG_PROC_FS=y
 CONFIG_FHANDLE=y

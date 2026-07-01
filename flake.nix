@@ -16,7 +16,7 @@
     # radxa-pkg/aic8800: modern-kernel-compatible rewrite of the
     # vendor AIC8800 driver.
     aic8800-radxa = {
-      url = "github:radxa-pkg/aic8800/9472567f729ef9f477098ebcd0751e0d65326b72";
+      url = "github:radxa-pkg/aic8800/bd11969265809a0fc948f1107c8256bbb2c1aa60";
       flake = false;
     };
 
@@ -93,37 +93,33 @@
         lib.optionals (builtins.pathExists ./authorized_keys)
           (lib.filter (key: key != "") (lib.splitString "\n" (builtins.readFile ./authorized_keys)));
 
-      rootWifiConf =
-        if builtins.pathExists ./wifi.conf
-        then builtins.readFile ./wifi.conf
-        else null;
-
       allowUnfreePredicate = pkg:
         builtins.elem (lib.getName pkg) [
           "nanokvm-factory-runtime"
           "sophgo-host-tools"
         ];
 
-      # Extra args threaded into every NixOS module via `specialArgs`.
-      # Lets module files reference flake-level facts (the nixpkgs
-      # input, the wifi conf) without importing flake.nix.
+      # Extra args threaded into every NixOS module via `_module.args`
+      # (a module inside the list, not specialArgs — see lib/mkBoard.nix).
+      # Lets module files reference flake-level facts (the wifi conf,
+      # the overlay) without importing flake.nix.
       boardExtraArgs = {
-        inherit nixpkgs rootAuthorizedKeys allowUnfreePredicate;
-        rootWifiConf = rootWifiConf;
+        inherit rootAuthorizedKeys allowUnfreePredicate;
         selfOverlay = self.overlays.default;
       };
 
-      # Compose a NixOS system from board / kernel / profile [+ mixins].
-      # See lib/mkBoard.nix.
-      mkBoard =
+      # Resolve a catalog-style {board, kernel, profile, …} record to
+      # the arg set lib/mkBoard.nix expects. Shared by the two leaf
+      # builders below so the nixosConfigurations and nixosModules
+      # views of a board can never drift apart.
+      resolveBoardArgs =
         { board
         , kernel
         , profile
         , mixins ? [ ]
         , extraModules ? [ ]
         ,
-        }:
-        mkBoardFn {
+        }: {
           board = ./boards + "/${board}.nix";
           kernel = ./profiles/kernel + "/${kernel}.nix";
           profile = ./profiles + "/${profile}.nix";
@@ -132,27 +128,35 @@
           extraArgs = boardExtraArgs;
         };
 
+      # Compose a NixOS system from board / kernel / profile [+ mixins].
+      mkBoard = args: mkBoardFn.mkBoard (resolveBoardArgs args);
+
+      # The same composition as a plain importable module, for
+      # downstream flakes that build their own nixosSystem around a
+      # board (fleet base modules, Colmena deployment options, …).
+      mkBoardModule = args: {
+        imports = mkBoardFn.mkBoardModules (resolveBoardArgs args);
+      };
+
       # Catalog of every {board, kernel, profile, variant} we publish.
       # One record per shipped configuration; both nixosConfigurations
       # and packages.boards.* are derived from this single source.
       catalog = import ./lib/catalog.nix { inherit lib; };
 
-      # Walk the catalog and produce the nested nixosConfigurations.boards
-      # attrset.  Each leaf is a `mkBoard {...}` call.
-      mkBoardSystemsFromCatalog = entries:
+      # Walk the catalog and produce a nested attrset keyed by
+      # entry.path, with each leaf built by `mkLeaf` from the entry's
+      # mkBoard-style args. Instantiated twice: once with `mkBoard`
+      # (nixosConfigurations.boards) and once with `mkBoardModule`
+      # (nixosModules.boards).
+      walkCatalog = mkLeaf: entries:
         lib.foldl'
           (acc: entry:
-            lib.recursiveUpdate acc (lib.setAttrByPath entry.path (mkBoard {
+            lib.recursiveUpdate acc (lib.setAttrByPath entry.path (mkLeaf {
               board = entry.boardName;
               inherit (entry) kernel profile;
               mixins = entry.mixins or [ ];
               extraModules =
-                (entry.modules or [ ])
-                ++ lib.optional
-                  (
-                    entry.boardName == "nanokvm-pcie" && rootWifiConf != null
-                  )
-                  ./modules/wifi-aic8800.nix;
+                entry.modules or [ ];
             })))
           { }
           entries;
@@ -166,7 +170,8 @@
       # (e.g. `usb-oled` = USB transport + OLED panel mixin).
       # =============================================================
       # NixOS systems for every catalog entry, attrpath = entry.path.
-      boardSystems = mkBoardSystemsFromCatalog catalog;
+      boardSystems = walkCatalog mkBoard catalog;
+      boardModules = walkCatalog mkBoardModule catalog;
 
       # =============================================================
       # Helpers that build the host-side artifacts (FIT, kexec payload,
@@ -187,6 +192,14 @@
         imports = [ self.nixosModules.nanokvm ];
         nixpkgs.overlays = [ self.overlays.default ];
       };
+      # Every catalog entry as a plain module (same nesting as
+      # nixosConfigurations.boards). Downstream fleets import e.g.
+      # `nixosModules.boards.pcie.mainline.sd` into their own
+      # lib.nixosSystem to make the board a regular fleet member; the
+      # module list is self-contained (no specialArgs required), so
+      # Colmena-style re-instantiation from `_module.args.modules`
+      # works without reconstructing anything.
+      nixosModules.boards = boardModules;
 
       nixosConfigurations.boards = boardSystems;
 
@@ -200,18 +213,17 @@
 
           art = mkArtifacts pkgs;
 
-          # Specialise the three artifact builders so the catalog-walker
-          # below can just call them with a catalog entry.
-          # For mkBoardFdt: only `licheerv` (cv1800/SG2002) produces these
-          # artifacts; nanokvm-pcie is its own sdImage-only path.
-          board = "licheerv";
+          # Specialise the artifact builders so the catalog-walker below
+          # can just call them with a catalog entry. The DTB each artifact
+          # boots comes from the entry's resolved `config.sg2002.fdt`, so
+          # nothing board-specific needs threading through here anymore.
           entryCfg = entry: lib.getAttrFromPath entry.path boardSystems;
           entryArtifactArgs = entry: entry.artifactArgs or { };
           entryArtifactArg = name: default: entry: (entryArtifactArgs entry).${name} or default;
-          entryVariant = entry: entry.variant or null;
           entryOled = entryArtifactArg "oled" false;
           entryExtraBootargs = entryArtifactArg "extraBootargs" [ ];
           entryRootfsBindIp = entryArtifactArg "rootfsBindIp" null;
+          entryRequireRootfsHostOverride = entryArtifactArg "requireRootfsHostOverride" false;
           entryIncludeKexec = entryArtifactArg "includeKexec" true;
 
           mkEntryPayload =
@@ -222,9 +234,7 @@
             }:
             art.mkKexecPayload {
               name = "nanokvm-kexec-${entry.tag}.erofs";
-              inherit board cfg extraBootargs;
-              inherit (entry) kernel;
-              variant = entryVariant entry;
+              inherit cfg extraBootargs;
               oled = entryOled entry;
             };
 
@@ -236,10 +246,7 @@
             ,
             }:
             art.mkBootFit {
-              inherit board cfg profile description;
-              inherit (entry) kernel;
-              variant = entryVariant entry;
-              oled = entryOled entry;
+              inherit cfg profile description;
             };
 
           liveArtifacts = entry:
@@ -248,6 +255,7 @@
               tag = entry.tag;
               oled = entryOled entry;
               rootfsBindIp = entryRootfsBindIp entry;
+              requireRootfsHostOverride = entryRequireRootfsHostOverride entry;
               extraBootargs = entryExtraBootargs entry;
               includeKexec = entryIncludeKexec entry;
               rootfs = art.mkLiveRootfs cfg;
@@ -262,12 +270,12 @@
               };
               kexec = art.mkKexecRunner {
                 name = "kexec";
-                inherit payload rootfs oled rootfsBindIp;
+                inherit payload rootfs oled rootfsBindIp requireRootfsHostOverride;
                 useRunningDtb = !oled && rootfsBindIp == null;
               };
               usb-boot = art.mkUsbBootRunner ({
                 name = "usb-boot";
-                inherit rootfsBindIp;
+                inherit rootfsBindIp requireRootfsHostOverride;
                 fit = mkEntryBootFit {
                   inherit entry cfg;
                   profile = "live";

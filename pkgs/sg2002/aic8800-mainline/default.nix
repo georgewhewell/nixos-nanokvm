@@ -2,9 +2,9 @@
 #
 # Sourced from radxa-pkg/aic8800, which tracks modern kernel API
 # changes. The `debian/patches/series` covers everything needed to
-# build against the current mainline tree (Linux 7.0 ≈ 6.19+ in the
-# old numbering):
+# build against the current mainline tree:
 #   - fix-linux-6.{1,5,7,9,13,14,15,16,17,19}-build.patch (kernel API compat)
+#   - fix-linux-7.1-build.patch (cfg80211 wireless_dev API compat)
 #   - fix-map-riscv64-subarch.patch (`uname -m` for cross-compile)
 #   - fix-vmalloc-not-include.patch
 #   - fix-sdio-fall-through.patch
@@ -36,6 +36,7 @@
     "fix-linux-6.16-build.patch"
     "fix-linux-6.17-build.patch"
     "fix-linux-6.19-build.patch"
+    "fix-linux-7.1-build.patch"
     "fix-map-riscv64-subarch.patch"
     "fix-vmalloc-not-include.patch"
     "fix-build-on-low-memory-devices.patch"
@@ -79,10 +80,9 @@ in
           patch -p1 -l < "$tmp"
           rm -f "$tmp"
         done
-        # Our own debug logging around the DBG_START_APP_REQ path so we
-        # can see what fw_addr/boot_type the driver is handing to firmware
-        # before the current cmd-1037 timeout.
-        patch -p1 < ${./patches/aic8800-log-startapp.patch}
+        # Radxa's 7.1 compat patch only covers the USB tree; carry the
+        # equivalent cfg80211/string API updates for the SDIO driver.
+        patch -p1 < ${./patches/aic8800-sdio-linux-7.1-cfg80211.patch}
       )
     '';
 
@@ -92,6 +92,7 @@ in
       for mk in aic8800_bsp/Makefile aic8800_fdrv/Makefile; do
         sed -i 's|"/vendor/etc/firmware"|"/lib/firmware/aic8800_sdio/aic8800DC"|' "$mk"
       done
+      sed -i '/#include <linux\/of_gpio.h>/d' aic8800_btlpm/rfkill.c
     '';
 
     makeFlags = [
@@ -104,6 +105,7 @@ in
     preBuild = ''
       cp -rp ${kernel.dev}/lib/modules/${kernel.modDirVersion}/build ktree
       chmod -R u+w ktree
+      sed -i 's|^export KBUILD_OUTPUT = .*|export KBUILD_OUTPUT = $(CURDIR)|' ktree/Makefile
     '';
 
     installPhase = ''

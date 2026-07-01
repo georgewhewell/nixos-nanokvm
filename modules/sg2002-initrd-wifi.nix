@@ -29,12 +29,13 @@ in {
       ];
 
       boot.extraModulePackages = [aic8800Pkg];
-      boot.initrd.availableKernelModules = lib.mkForce [
+      sg2002.initrd.pruneKernelModules = true;
+      sg2002.initrd.availableKernelModules = [
         "aic8800_bsp"
         "aic8800_fdrv"
         "aic8800_btlpm"
       ];
-      boot.initrd.kernelModules = lib.mkForce [
+      sg2002.initrd.kernelModules = [
         "aic8800_bsp"
         "aic8800_fdrv"
         "aic8800_btlpm"

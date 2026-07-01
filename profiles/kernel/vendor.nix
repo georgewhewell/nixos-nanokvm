@@ -21,7 +21,12 @@
     hdmi.enable = lib.mkDefault true;
 
     # Use the cgo-linked server build (the one that talks to
-    # libkvm.so for HDMI capture).
-    package = lib.mkDefault pkgs.buildPackages.nanokvm-server;
+    # libkvm.so for HDMI capture), forced to riscv64. Do NOT use
+    # `pkgs.buildPackages.nanokvm-server` here: buildPackages is the
+    # *build host* set, so its hostPlatform is x86_64 — the derivation
+    # then force-falls-back to noCamera AND emits an x86_64 binary
+    # that dies 203/EXEC on the device. (Same trap the mainline
+    # profile documents for nanokvm-server-nocamera.)
+    package = lib.mkDefault pkgs.nanokvm-server-device-camera;
   };
 }

@@ -1,9 +1,16 @@
 # OLED panel mixin. When `nanokvm.oled.enable = true`:
 #
-# - hardware/DT side comes from the kexec-time overlay (see
-#   `dtb/sg2002-licheerv-nano-oled.dtso` and `oled = true` on
-#   mkUsbKexec / mkUsbKexecPayload). It binds the SH1107 panel to the
-#   patched ssd1307fb driver and creates /dev/fb0 + fbcon.
+# - hardware/DT side: the panel nodes have to be in the booted DTB.
+#   Two cases:
+#     * LicheeRV-Nano (SH1107 128x128 on IIC1): the default DTB lacks
+#       the panel, so this module swaps `sg2002.fdt` to the oled
+#       variant DTB (and the kexec path applies the matching overlay,
+#       see `dtb/sg2002-licheerv-nano-oled.dtso` + `oled = true` on
+#       mkUsbKexec / mkUsbKexecPayload).
+#     * NanoKVM-PCIe (SSD1306 128x64 on a bit-banged i2c-gpio bus):
+#       the board's own DTB already carries the panel nodes — the
+#       board sets `useOledFdt = false` to keep it.
+#   Either way ssd1307fb binds the panel and creates /dev/fb0 + fbcon.
 # - stage-2 userspace side, here: a tiny systemd service runs a normal
 #   terminal program on /dev/tty1. fbcon renders that to the OLED
 #   framebuffer; no userspace process talks to I2C.
@@ -55,9 +62,22 @@ in
       // {
         description = ''
           Run `nanokvm.oled.command`, which writes text to tty1 for
-          fbcon to render on the SH1107-backed /dev/fb0.
+          fbcon to render on the ssd1307fb-backed /dev/fb0.
         '';
       };
+
+    useOledFdt = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Swap `sg2002.fdt` to the LicheeRV oled-variant DTB (mainline
+        kernel only). That variant trades the WiFi pads for the SH1107
+        panel, so it is right for the LicheeRV-Nano but wrong for
+        boards whose primary DTB already carries their own panel nodes
+        — the NanoKVM-PCIe sets this to false and keeps its pcie DTB
+        (SSD1306 on i2c-gpio, no pad conflicts).
+      '';
+    };
 
     command = mkOption {
       type = types.str;
@@ -71,6 +91,22 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # LicheeRV OLED uses the variant DTB that disables SDIO1 and wires
+    # those pads to IIC1 + the SH1107 panel (mainline only; vendor
+    # handles it in its own DTS). Boards with the panel in their own
+    # DTB opt out via useOledFdt = false.
+    sg2002.fdt = lib.mkIf (cfg.useOledFdt && config.sg2002.kernel == "mainline") (
+      lib.mkDefault pkgs.sg2002-dtb-mainline-oled
+    );
+
+    # 4x6 micro-font: the default 8x16 fits only 16x4 chars on a
+    # 128x64 panel (16x8 on 128x128) — too cramped for `top`. Only
+    # boots that read boot.kernelParams (extlinux SD images) pick this
+    # up; the USB/kexec artifact paths add the same flag themselves in
+    # lib/artifacts.nix (mkFeatureBootargs), so at worst the argument
+    # is duplicated, which the kernel handles fine.
+    boot.kernelParams = [ "fbcon=font:MINI4x6" ];
+
     # NixOS enables `getty@tty1` by default — it grabs /dev/tty1 and
     # paints "<host> login:" via fbcon onto fb0. Our oled-app wants
     # tty1 too. Disable the default so the app's writes aren't

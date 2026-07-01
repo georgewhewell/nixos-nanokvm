@@ -1,0 +1,188 @@
+/* NanoKVM-PCIe carrier overlay (mainline).
+ *
+ * The SG2002 has an on-die GMAC (snps,dwmac-3.70a) at 0x4070000 with an
+ * internal 10/100 EPHY reached through the mmioreg mdio-mux. The
+ * upstream cv180x.dtsi defines both but leaves them `status =
+ * "disabled"` (the LicheeRV-Nano dev board has no ethernet). The
+ * NanoKVM-PCIe carrier wires the GMAC to the RJ45, so enable them.
+ *
+ * Layered on top of sg2002-licheerv-nano-bw.dtsi, which already keeps
+ * SDIO1 (AIC8800 WiFi) enabled — so this DTB carries both ethernet,
+ * WiFi and the front-panel OLED for the PCIe board.
+ */
+
+&mdio {
+	status = "okay";
+};
+
+/* SD card slot on sdhci0 (mmc@4310000). Upstream cv180x.dtsi leaves it
+ * disabled and the base bw.dtsi only wires sdhci1 (SDIO/WiFi), so Linux
+ * never saw the card — blocking both booting from SD and writing it.
+ * Pins/props cribbed from upstream sg2002-licheerv-nano-b.dts. */
+&pinctrl {
+	sdhci0_cfg: sdhci0-cfg {
+		sdhci0-clk-pins {
+			pinmux = <PINMUX(PIN_SD0_CLK, 0)>;
+			/*
+			 * The reset/default pad state already has the clock
+			 * pull-down enabled. Requesting pull-up here leaves both
+			 * pulls active because the cv18xx pinctrl driver only
+			 * updates the named bias bit. Keep the clock pulled down
+			 * like the vendor SDIO pad init does; CMD/DAT/CD stay
+			 * pulled up below.
+			 */
+			/delete-property/ bias-pull-up;
+			bias-pull-down;
+			drive-strength-microamp = <16100>;
+			power-source = <3300>;
+		};
+		sdhci0-cmd-pins {
+			pinmux = <PINMUX(PIN_SD0_CMD, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+		sdhci0-data-pins {
+			pinmux = <PINMUX(PIN_SD0_D0, 0)>,
+				 <PINMUX(PIN_SD0_D1, 0)>,
+				 <PINMUX(PIN_SD0_D2, 0)>,
+				 <PINMUX(PIN_SD0_D3, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+		sdhci0-cd-pins {
+			pinmux = <PINMUX(PIN_SD0_CD, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+		sdhci0-pwr-en-pins {
+			pinmux = <PINMUX(PIN_SD0_PWR_EN, 0)>;
+			bias-pull-down;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+
+	/* Front-panel OLED pads. Vendor firmware muxes these to GPIO via
+	 * devmem (fmux 0x3c/0x58/0x50 = 3); the mainline cv18xx pinctrl
+	 * driver has no gpio_request_enable hook, so the dwapb gpio
+	 * controller can't mux them on request — an explicit group is
+	 * required. Pad → GPIO mapping (fn 3, per pinctrl-sg2002.c):
+	 *   SPK_EN    → XGPIOA[15] = I2C SCL
+	 *   EMMC_DAT3 → XGPIOA[27] = I2C SDA
+	 *   EMMC_CLK  → XGPIOA[22] = panel reset (active-low)
+	 * All three sit in the VDDIO_SD0_EMMC domain like the SD0 pads
+	 * above, hence the same 3300 mV power-source. */
+	oled_i2c_cfg: oled-i2c-cfg {
+		oled-i2c-pins {
+			pinmux = <PINMUX(PIN_SPK_EN, 3)>,
+				 <PINMUX(PIN_EMMC_DAT3, 3)>;
+			/* Bit-banged open-drain I2C: the on-die pulls are
+			 * weak but harmless alongside the carrier's
+			 * external pull-ups. */
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+		oled-reset-pins {
+			pinmux = <PINMUX(PIN_EMMC_CLK, 3)>;
+			/* Reset is active-low; pull up so the panel stays
+			 * out of reset until ssd1307fb claims the line. */
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+};
+
+/* Front-panel SSD1306 128x64 OLED at 0x3c on a bit-banged I2C bus
+ * (the panel isn't wired to any hardware I2C controller — vendor
+ * firmware bit-bangs the same two GPIOs from userspace). The carrier
+ * may ship with the footprint unpopulated; ssd1307fb is a module and a
+ * probe failure on a missing panel is harmless.
+ *
+ * Panel init mapped from the vendor sequence to ssd1307fb defaults for
+ * "solomon,ssd1306fb-i2c" (drivers/video/fbdev/ssd1307fb.c):
+ *   0xA8/0x3F mux 1/64        → solomon,height = <64> (driver: height-1)
+ *   0xDA/0x12 COM pins alt    → driver default (no com-seq/com-lrremap)
+ *   0xA1 segment remap ON     → driver default (no segment-no-remap)
+ *   0xC8 COM scan inverted    → solomon,com-invdir
+ *   0xD9/0xF1 precharge       → solomon,prechargep1/2 = <1>/<15>
+ *   0xD3/0x00 display offset  → driver default (com-offset 0)
+ *   0x8D/0x14 charge pump ON  → automatic (ssd1306 need_chargepump)
+ *   0x81/0xCF + 0xDB/0x40 (contrast/vcomh) have no DT properties; the
+ *   driver's 127/0x20 are visibly fine and contrast is adjustable at
+ *   runtime through the backlight class device.
+ * page-offset must be 0 — the driver's legacy default is 1, which
+ * would wrap the top 8 pixel rows off the panel. */
+/ {
+	oled_i2c: i2c-oled {
+		compatible = "i2c-gpio";
+		pinctrl-0 = <&oled_i2c_cfg>;
+		pinctrl-names = "default";
+		scl-gpios = <&porta 15 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		sda-gpios = <&porta 27 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		/* Vendor userspace bit-bang timing; ~100 kHz equivalent. */
+		i2c-gpio,delay-us = <5>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		oled@3c {
+			compatible = "solomon,ssd1306fb-i2c";
+			reg = <0x3c>;
+			reset-gpios = <&porta 22 GPIO_ACTIVE_LOW>;
+			solomon,width = <128>;
+			solomon,height = <64>;
+			solomon,page-offset = <0>;
+			solomon,col-offset = <0>;
+			solomon,com-invdir;
+			solomon,prechargep1 = <1>;
+			solomon,prechargep2 = <15>;
+		};
+	};
+};
+
+&sdhci0 {
+	pinctrl-0 = <&sdhci0_cfg>;
+	pinctrl-names = "default";
+	status = "okay";
+	resets = <&rst 16>;
+	reset-names = "sdhci";
+	bus-width = <4>;
+	min-frequency = <400000>;
+	max-frequency = <25000000>;
+	/* Vendor SD init sets MSHC_CTRL bits 8/9 for latched output paths.
+	 * Mainline only did this for SDIO1, but this carrier's SD0 slot
+	 * answers with command CRC errors without the same vendor bits. */
+	sophgo,mshc-ctrl-8-9;
+	/* Match the vendor SD0 clock source: fpll(1500 MHz) / 4 = 375 MHz. */
+	sophgo,sdio-clkgen-pll-reg = <0x03002070>;
+	sophgo,sdio-clkgen-pll-div = <0x00040109>;
+	sophgo,sdio-clkgen-bypass-reg = <0x03002030>;
+	sophgo,sdio-clkgen-bypass-bit = <6>;
+	/* Vendor sdhci-cv181x restores the SD power switch before probing SD0. */
+	sophgo,sd-pwrsw-ctrl-reg = <0x030001f4>;
+	no-1-8-v;
+	no-mmc;
+	no-sdio;
+	disable-wp;
+	/* The SD0_CD card-detect line is unreliable on this carrier (it
+	 * intermittently reports "no card" after a power-cycle, so the
+	 * kernel never probes an inserted card). Ignore CD and poll the
+	 * slot directly. */
+	broken-cd;
+};
+
+&gmac0 {
+	/* Just enable the node; the phy-mode (rmii) and the internal-EPHY
+	 * mdio-mux come from the upstream include chain. The earlier -EINVAL
+	 * ("validation of rmii/internal ... failed") was NOT a phy-mode
+	 * problem: the internal EPHY was still shut down, so MDIO read no
+	 * abilities and the MAC/PHY speed-cap intersection came out empty.
+	 * Our dwmac-sophgo patch 0013 powers the EPHY up in probe (it then
+	 * answers MDIO with phy_id 0x00435649), after which the Generic PHY
+	 * attaches and validates against the dwmac1000 10/100 caps. */
+	status = "okay";
+};

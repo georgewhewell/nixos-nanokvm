@@ -20,17 +20,17 @@
     "aic8800-radxa": {
       "flake": false,
       "locked": {
-        "lastModified": 1776411293,
-        "narHash": "sha256-r3XT4VRcPWfo4hikNDMZGgUqUk8Q+U8u86CsgRHnrr4=",
+        "lastModified": 1782473402,
+        "narHash": "sha256-7M02L7G/cadlUWF3YG5CAumtmV7RmEbRHWqZQTddRUI=",
         "owner": "radxa-pkg",
         "repo": "aic8800",
-        "rev": "9472567f729ef9f477098ebcd0751e0d65326b72",
+        "rev": "bd11969265809a0fc948f1107c8256bbb2c1aa60",
         "type": "github"
       },
       "original": {
         "owner": "radxa-pkg",
         "repo": "aic8800",
-        "rev": "9472567f729ef9f477098ebcd0751e0d65326b72",
+        "rev": "bd11969265809a0fc948f1107c8256bbb2c1aa60",
         "type": "github"
       }
     },

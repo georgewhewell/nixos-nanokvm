@@ -27,6 +27,7 @@ import sys
 MARKER = "# patched by sg2002-cv181x-rom-dl-skip-2nd-stage.py"
 TIMEOUT_MARKER = "# patched timeout: short read so disconnect doesn't deadlock"
 FAST_OPEN_MARKER = "# patched fast-open: skip the 100ms pre-open sleep"
+FLUSH_EIO_MARKER = "# patched flush-eio: swallow transient tcflush EIO"
 
 
 def main():
@@ -40,6 +41,7 @@ def main():
     )
     patch_pyserial_timeout(pyserial_path)
     patch_pyserial_fast_open(pyserial_path)
+    patch_pyserial_flush_eio(pyserial_path)
     # NOTE: skip_2nd_stage is intentionally disabled. After BREAK the
     # chip transitions to FSBL which presents `cvi_utask` at 3346:1001
     # — FSBL uses that to pull the REST of FIP from the host (only
@@ -117,6 +119,67 @@ def patch_pyserial_fast_open(path):
     with open(path, "w") as f:
         f.write(new_src)
     print(f"patched (fast-open): {path}")
+
+
+def patch_pyserial_flush_eio(path):
+    """serial_write() does:
+
+        try:
+            self.device.write(command)
+            self.device.flushOutput()
+        except serial.SerialTimeoutException as e:
+            return pkt.FAIL
+
+    flushOutput() is tcflush(TCOFLUSH), which raises termios.error
+    (EIO — an OSError, NOT a SerialTimeoutException) when the cdc_acm
+    port is in a transitional state. Over a USB hub the CV181x ROM
+    cycles so fast this fires on nearly every attempt, and the
+    UNHANDLED OSError crashes the whole tool mid-1st-stage FIP send —
+    so the push never completes and U-Boot never comes up. write()
+    has already queued the bytes and the recv_ack read is the real
+    success check, so wrap flushOutput() to swallow the EIO and keep
+    going. Anchor on the exact two-line write/flush pair.
+    """
+    with open(path) as f:
+        src = f.read()
+    if FLUSH_EIO_MARKER in src:
+        print(f"already patched (flush-eio): {path}")
+        return
+    pattern = re.compile(
+        r'(\n            self\.device\.write\(command\)\n)'
+        r'            self\.device\.flushOutput\(\)\n'
+    )
+    # NB: catch Exception, not OSError — termios.error (raised by
+    # tcflush) is its OWN exception class, NOT an OSError subclass, so
+    # `except OSError` silently misses it and the tool still crashes.
+    replacement = (
+        r'\1'
+        f'            try:  {FLUSH_EIO_MARKER}\n'
+        '                self.device.flushOutput()\n'
+        '            except Exception:\n'
+        '                pass\n'
+    )
+    new_src, n = pattern.subn(replacement, src, count=1)
+    if n == 0:
+        print(f"WARN: flush-eio pattern not found in {path}; skipping")
+        return
+
+    # serial_write also catches only `serial.SerialTimeoutException` on
+    # both the write() and the recv_ack read(). Over a hub the device
+    # cycles mid-2nd-stage push and read() raises the *parent*
+    # serial.SerialException ("device reports readiness to read but
+    # returned no data") — not a Timeout subclass — so it crashes too.
+    # Broaden every SerialTimeoutException handler in the file to
+    # Exception so any transient cycle just fails that chunk (-> the
+    # caller retries) instead of killing the whole push.
+    new_src = new_src.replace(
+        "except serial.SerialTimeoutException as e:",
+        "except Exception as e:  # broadened: hub cycles raise non-Timeout errors",
+    )
+
+    with open(path, "w") as f:
+        f.write(new_src)
+    print(f"patched (flush-eio + broadened serial excepts): {path}")
 
 
 def patch_skip_2nd_stage(path):

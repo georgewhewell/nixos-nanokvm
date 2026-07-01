@@ -150,6 +150,8 @@
 	sophgo,sdio-clkgen-pll-div = <0x00040109>;
 	sophgo,sdio-clkgen-bypass-reg = <0x03002030>;
 	sophgo,sdio-clkgen-bypass-bit = <7>;
+	sophgo,mshc-ctrl-8-9;
+	sophgo,mshc-ctrl-16;
 
 	/* AIC8800 power-enable is GPIOA26, wired out on the EMMC_DAT2
 	 * pad. wifi_pwr_cfg above describes the board wiring, but on

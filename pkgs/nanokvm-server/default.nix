@@ -15,6 +15,14 @@
   # kernels and SEGV in SAMPLE_COMM_VI_ParseIni. Vendor 5.10 builds
   # leave this false to keep the working HDMI capture path.
   noCamera ? false,
+  # Force the build target system regardless of stdenv.hostPlatform.
+  # Needed because this Go package gets spliced to the *build* platform
+  # in a cross NixOS config (so stdenv.hostPlatform.system reads
+  # x86_64-linux even when the device is riscv64), which silently
+  # produces a wrong-arch binary that dies 203/EXEC on the device. The
+  # NixOS module passes "riscv64-linux" here. nocamera builds are pure
+  # Go (CGO_ENABLED=0) so this is just a GOARCH cross-compile.
+  targetSystem ? null,
 }: let
   # Two build modes:
   #   - riscv64-cross: cross-compile from x86_64 host, link against
@@ -25,7 +33,10 @@
   #     x86_64-linux on a dev machine). No factory blobs, no
   #     C906-specific cgo flags. Forces `noCamera = true` because the
   #     libkvm.so / OpenCV runtime is riscv64-only.
-  hostSys = stdenv.hostPlatform.system;
+  hostSys =
+    if targetSystem != null
+    then targetSystem
+    else stdenv.hostPlatform.system;
   isRiscvCross = hostSys == "riscv64-linux";
   # Force noCamera on non-riscv64 — libkvm.so doesn't exist for the
   # target architecture and the cgo include path would fail anyway.
@@ -153,6 +164,40 @@ in
           cp -a ${nanokvm-factory-runtime}/ko "$runtimeDir/system/ko"
           cp -a ${nanokvm-patched-src}/kvmapp/kvm_system "$runtimeDir/kvm_system"
           cp -a ${nanokvm-patched-src}/kvmapp/picoclaw "$runtimeDir/picoclaw"
+        ''
+      }
+
+      ${
+        lib.optionalString (isRiscvCross && !effectiveNoCamera) ''
+          # Camera builds also carry the prebuilt kvm_system binary
+          # (LT6911 bridge config / OLED UI / ATX buttons — capture
+          # doesn't work without it; see nanokvm-factory-runtime for
+          # provenance). The source kvm_system/ dir copied above only
+          # holds a zero-byte kvm_stream placeholder — overlay the real
+          # binary on top so the module's /kvmapp/kvm_system symlink
+          # serves both. Its stock interpreter
+          # (/lib/ld-musl-riscv64v0p7_xthead.so.1) and NEEDED libs
+          # (libstdc++/libgcc_s/libc) don't exist on a NixOS rootfs;
+          # point both at the same cross-musl runtime the server's
+          # dl_lib rpath already uses. Keep $ORIGIN/dl_lib first for
+          # fidelity with the stock rpath (the shipped dl_lib/ is
+          # empty, but harmless).
+          chmod -R u+w "$runtimeDir/kvm_system"
+          cp -a ${nanokvm-factory-runtime}/kvm_system/. "$runtimeDir/kvm_system/"
+          chmod u+w "$runtimeDir/kvm_system/kvm_system"
+          patchelf \
+            --set-interpreter "${riscvMusl.musl}/lib/ld-musl-riscv64.so.1" \
+            --set-rpath "\$ORIGIN/dl_lib:${targetRuntimeLibPath}" \
+            "$runtimeDir/kvm_system/kvm_system"
+
+          # Sensor INI for the vendor capture SDK. libkvm_mmf.so's
+          # SAMPLE_COMM_VI_ParseIni reads /mnt/data/sensor_cfg.ini at
+          # kvmv_init time; the stock S95nanokvm refreshes it from the
+          # .LT (Lontium LT6911) variant on every boot. Ship the
+          # variants under lib/nanokvm/data so the NixOS compat unit
+          # can install the .LT one the same way.
+          mkdir -p "$runtimeDir/data"
+          cp -a ${nanokvm-factory-runtime}/data/. "$runtimeDir/data/"
         ''
       }
       printf '%s\n' 'unstable' > "$runtimeDir/version"

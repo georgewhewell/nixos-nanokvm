@@ -1,10 +1,13 @@
 result
 result-*
 .direnv
-# WPA supplicant config baked into the wifi-mode initrd. Lives outside
-# git so credentials don't leak. Note: the contents still end up in the
-# Nix store (world-readable on a multi-user system) once the flake is
-# evaluated — fine for diagnostic builds, not for prod.
+
+# Local access material. These are useful for standalone images, but
+# downstream fleet configs should own real users and keys.
+authorized_keys
+
+# Legacy/local wpa_supplicant snippets. Credentials belong in the
+# downstream fleet config or secrets system, not in this reusable repo.
 wifi.conf
 
 # Per-device snapshots taken before flashing (wifi PSK, tailscaled state,
@@ -21,6 +24,10 @@ secrets/
 # Host runner status/log files from USB boot and kexec sessions.
 .nanokvm-*.log
 .nanokvm-*.pid
+
+# Python helper byproducts.
+__pycache__/
+*.py[cod]
 
 # Local terminal recordings and rendered boot GIFs.
 media/captures/
