@@ -164,5 +164,4 @@ execution does not depend on QEMU translating the filesystem autodetection
 ioctl. The usual filesystem check and xattr operation remain in place.
 
 This is image-build and filesystem validation, **not a physical SD boot**.
-No card was overwritten. The combined Wi-Fi/LCD hardware test described in
-the [USB report](usb-initrd-validation-20260918.md) used the RAM-only image.
+No card was overwritten.

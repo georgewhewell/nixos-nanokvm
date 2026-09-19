@@ -467,7 +467,7 @@ let
         made every RX frame take that path on the SG2002; the two gadget
         quirks (as set by dwc3, cdns3 and renesas_usbf) make u_ether hand
         over aligned, packet-multiple buffers instead. Generic dwc2 change,
-        not SoC-specific; hardware A/B in docs/sg2002-usb-validation-20260919.md.
+        not SoC-specific; verified by hardware A/B.
       '';
     };
     "mmc-sdhci-of-dwcmshc-sg2002-sdio1-init" = {

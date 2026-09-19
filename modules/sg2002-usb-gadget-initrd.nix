@@ -6,8 +6,7 @@
 # networkd then owns usb0 like every other stage-2 interface.
 #
 # `sg2002.usbGadget.network.transport` picks the framing. All three were
-# measured on a LicheeRV Nano W at high-speed on 2026-09-19 (see
-# docs/sg2002-usb-validation-20260919.md); none of them wedged.
+# measured on a LicheeRV Nano W at high-speed on 2026-09-19; none of them wedged.
 #   - "ecm"   — vendor-neutral CDC-ECM, Linux `cdc_ether`. One frame per
 #               bulk transfer. Default: simplest, and the fastest into
 #               the board.

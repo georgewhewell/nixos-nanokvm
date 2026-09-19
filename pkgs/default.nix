@@ -663,7 +663,6 @@ in
   sg2002-h264-bridge-pcma = final.callPackage ./sg2002/h264-bridge {
     enablePcma = true;
   };
-  sg2002-alsa-kernel-test = final.callPackage ./sg2002/alsa-kernel-test { };
 
   sg2002-usb-boot-for = mainlineFip:
     final.callPackage ./sg2002/usb-boot {
