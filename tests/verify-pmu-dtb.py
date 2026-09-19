@@ -2,8 +2,7 @@
 
 OpenSBI is built around U-Boot's DTB because the SG2002's FSBL passes no
 FDT, so this is the only device tree that reaches the SBI PMU event table.
-Everything asserted here was measured on a PicoClaw; see
-docs/sg2002-performance.md.
+Everything asserted here was measured on a PicoClaw.
 """
 import subprocess
 import sys

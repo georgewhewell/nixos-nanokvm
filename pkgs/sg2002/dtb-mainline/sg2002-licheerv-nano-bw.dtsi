@@ -36,8 +36,7 @@
 	 * Verified from debugfs hw_params/params on the Nano W. */
 	g-use-dma;
 
-	/* High-speed. Measured on a LicheeRV Nano W on 2026-09-19 (see
-	 * docs/sg2002-usb-validation-20260919.md): full-speed tops out at
+	/* High-speed. Measured on a LicheeRV Nano W on 2026-09-19: full-speed tops out at
 	 * ~7.7 Mbit/s each way; high-speed carries ~220 Mbit/s into the
 	 * board and ~190 Mbit/s out with CDC-ECM. The old full-speed cap
 	 * dated from PicoClaw-carrier link errors (-71 EPROTO) that have

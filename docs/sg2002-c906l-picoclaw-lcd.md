@@ -171,9 +171,6 @@ traffic over Wi-Fi. Check both the regulator and framebuffer
 
 ## Hardware validation: 2026-09-16
 
-For the newer combined Wi-Fi/LCD contract and standalone initrd, see the
-[2026-09-18 hardware report](usb-initrd-validation-20260918.md).
-
 These measurements cover the earlier LCD-only contract, before the Wi-Fi
 power provider was added. They are not evidence of simultaneous Wi-Fi/LCD
 operation with the new contract.

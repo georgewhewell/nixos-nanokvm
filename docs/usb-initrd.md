@@ -134,9 +134,7 @@ unlisted key, no failed units, and remaining in stage 1. FIT builds also enforce
 
 The standalone PicoClaw image also passed a physical ROM-to-Linux upload from
 a Debian container without Nix, followed by simultaneous Wi-Fi traffic, LCD
-page flips, ALSA playback/capture and RPMsg checks. See the
-[2026-09-18 hardware report](usb-initrd-validation-20260918.md) for timings,
-the tested identities and remaining limitations.
+page flips, ALSA playback/capture and RPMsg checks.
 
 Hydra builds every catalog image under `hydraJobs.x86_64-linux.images`, plus
 the VM, uploader and hardware regression checks. USB CI bundles intentionally

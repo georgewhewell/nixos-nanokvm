@@ -71,9 +71,6 @@ See [C906L architecture and hardware evidence](docs/sg2002-c906l.md) and
 [mainline ISP support](docs/sg2002-mainline-isp.md). Commands in historical
 network-root bring-up reports describe an older development workflow.
 
-[Performance and profiling](docs/sg2002-performance.md) covers platform-wide
-C906 compiler tuning, measured improvements and the remaining hardware limits.
-
 The separate `qemu-c906-virt` app runs a full development VM with the shared
 kernel and a 256 MiB C906 model. QEMU has no SG2002 peripheral model: it cannot
 validate LCD, SDIO Wi-Fi, USB gadget, audio or camera hardware.

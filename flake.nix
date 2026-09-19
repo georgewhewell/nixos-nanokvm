@@ -446,7 +446,6 @@
             sg2002-c906l-rust-timer6
             sg2002-c906l-rust-timer7
             sg2002-c906l-rust-all-timers
-            sg2002-alsa-kernel-test
             sg2002-h264-bridge
             sg2002-h264-bridge-pcma
             sg2002-kernel-mainline

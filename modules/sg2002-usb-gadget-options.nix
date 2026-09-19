@@ -51,8 +51,7 @@
 
         Measured on a LicheeRV Nano W at high-speed with the shipped
         kernel and FIFO layout, 20 s iperf3 TCP runs, single samples,
-        board CPU saturated in every case
-        (docs/sg2002-usb-validation-20260919.md): host->board ECM 222,
+        board CPU saturated in every case: host->board ECM 222,
         NCM 231 Mbit/s; board->host ECM 188, NCM 261 Mbit/s. RNDIS was
         only measured before the RX-buffer patch and FIFO change (191
         and 134 Mbit/s). ECM remains the default; pick NCM when traffic
