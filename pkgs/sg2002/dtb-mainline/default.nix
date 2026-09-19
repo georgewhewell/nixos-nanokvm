@@ -208,8 +208,15 @@ let
 
   # PicoClaw: keep the proven no-WiFi USB/NFS base, then add the onboard
   # ST7789 SPI panel and its three GPIO control lines. The carrier stays
-  # at full-speed: its 2026-08 high-speed bring-up showed link errors and
-  # the 2026-09-19 high-speed validation ran on the bare Nano W only.
+  # at full-speed. Retested at high-speed on 2026-09-19 with the shipped
+  # FIFO layout: the 2026-08 -71 EPROTO enumeration errors did not return
+  # and throughput matched the Nano W (225/181 Mbit/s), but 12 minutes
+  # into a board-to-host soak the gadget's bulk-IN path stopped completing
+  # requests with no kernel message on either side; EP0 and bulk-OUT kept
+  # working, and only a host-side port reset brought usb0 back. Two later
+  # soaks of 20 and 30 minutes were clean. A transport that can silently
+  # stop is worse than one that is slow, so the pin remains until that
+  # wedge is understood; picoclaw-lcd-high-speed is the retest DTB.
   dtbPicoClawLcd = buildDtb "sg2002-licheerv-nano-picoclaw-lcd" [
     ./sg2002-licheerv-nano-bw.dtsi
     ./sg2002-licheerv-nano-bw-nowifi.dtsi

@@ -3,10 +3,13 @@
  * The shared carrier description runs the dwc2 gadget at high-speed.
  * Concatenating this file last caps the link at full-speed (12 Mbit/s
  * signalling, ~7.7 Mbit/s measured), leaving the kernel, FIFO layout,
- * DMA mode, gadget functions, cable and host port unchanged. Use it on
- * carriers where high-speed has not been validated (PicoClaw, which
- * showed -71 EPROTO enumeration errors at high-speed in 2026-08) or to
- * A/B a link problem against the larger full-speed signal margins.
+ * DMA mode, gadget functions, cable and host port unchanged. PicoClaw
+ * keeps it: its 2026-08 -71 EPROTO enumeration errors did not recur in
+ * the 2026-09-19 high-speed retest, but that retest caught the gadget's
+ * bulk-IN path stopping silently after 12 minutes of board-to-host
+ * traffic, recoverable only by a host-side port reset (see the PicoClaw
+ * entries in default.nix). It also serves to A/B a link problem against
+ * the larger full-speed signal margins.
  */
 
 &usb {
