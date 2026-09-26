@@ -86,6 +86,10 @@ let
       patch = ./patches/0003-dmaengine-cv1800b-dmamux-fix-channel-allocation-order.patch;
     })
     (patch {
+      name = "dmaengine-dw-axi-dmac-quiet-missing-apb-block";
+      patch = ./patches/0079-dmaengine-dw-axi-dmac-don-t-report-a-missing-APB-block-as-an-error.patch;
+    })
+    (patch {
       name = "asoc-cv1800b-sound-adc-init-analog-stage";
       patch = ./patches/0005-ASoC-cv1800b-sound-adc-init-analog-stage.patch;
     })
@@ -526,6 +530,15 @@ let
       notes = ''
         Clears FRAME_SETTING.FS_IDEF so a frame starts on one LRCK edge.
         Needed once the internal ADC is the clock provider for I2S0.
+      '';
+    };
+    "dmaengine-dw-axi-dmac-quiet-missing-apb-block" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "dw-axi-dmac stops logging the missing APB block at error level upstream";
+      notes = ''
+        Every audio stream start logged "apb_regs not initialized" at
+        error level, which the PicoClaw prints over the LCD console.
       '';
     };
     "thermal-cv1800-Add-cv1800-thermal-driver-support" = {
