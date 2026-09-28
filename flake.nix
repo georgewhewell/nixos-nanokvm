@@ -667,11 +667,11 @@
           sg2002-initrd-eval = import ./tests/usb-initrd-eval.nix {
             inherit pkgs lib;
             configs = map checkedConfig (builtins.filter (entry: entry.artifact == "initrd") catalog);
-            profilingConfig = (boardSystems.licheerv.mainline.initrd.default.extendModules {
+            overriddenKernelConfig = (boardSystems.licheerv.mainline.initrd.default.extendModules {
               modules = [ ({ config, lib, pkgs, ... }: {
                 boot.kernelPackages = lib.mkForce (pkgs.linuxPackagesFor
                   (pkgs.sg2002-kernel-mainline.override {
-                    profiling = true;
+                    thermalEmulation = true;
                     audio = config.sg2002.audio.enable;
                   }));
               }) ];

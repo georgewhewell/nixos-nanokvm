@@ -1,8 +1,8 @@
-{ pkgs, lib, configs, profilingConfig }:
+{ pkgs, lib, configs, overriddenKernelConfig }:
 let
-  profilingWifi = builtins.filter
+  overriddenKernelWifi = builtins.filter
     (p: lib.hasPrefix "aic8800-" (lib.getName p))
-    profilingConfig.boot.extraModulePackages;
+    overriddenKernelConfig.boot.extraModulePackages;
   check = config:
     let
       stage1 = config.boot.initrd;
@@ -64,10 +64,10 @@ let
     true;
 in
 assert lib.all check configs;
-assert builtins.length profilingWifi == 1;
+assert builtins.length overriddenKernelWifi == 1;
 assert lib.hasInfix (builtins.unsafeDiscardStringContext
-  (toString profilingConfig.boot.kernelPackages.kernel.dev))
-  (builtins.head profilingWifi).preBuild;
+  (toString overriddenKernelConfig.boot.kernelPackages.kernel.dev))
+  (builtins.head overriddenKernelWifi).preBuild;
 pkgs.runCommand "sg2002-initrd-eval" { } ''
   touch "$out"
 ''

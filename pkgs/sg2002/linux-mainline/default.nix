@@ -21,9 +21,8 @@
   linux_7_2,
   audio ? false,
   bluetooth ? false,
-  # Diagnostic builds retain the same hardware configuration and safety
-  # checks, but expose perf and pressure metrics for workload profiling.
-  profiling ? false,
+  # Temperature injection is a diagnostic control, independent of profiling.
+  thermalEmulation ? false,
   # nixpkgs re-.override's kernels with `features` / friends; tolerate
   # any extra args callPackage / linuxPackagesFor threads through.
   ...
@@ -39,10 +38,7 @@
     extraMeta.branch = "7.2";
   };
   structuredExtraConfig = (import ./config.nix {inherit lib;})
-    // lib.optionalAttrs profiling {
-      PERF_EVENTS = lib.kernel.yes;
-      PSI = lib.kernel.yes;
-      PSI_DEFAULT_DISABLED = lib.kernel.no;
+    // lib.optionalAttrs thermalEmulation {
       # Test the thermal cooling map without physically overheating a board.
       # Normal images do not expose the temperature-emulation interface.
       THERMAL_EMULATION = lib.kernel.yes;

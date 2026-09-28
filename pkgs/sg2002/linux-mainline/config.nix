@@ -330,13 +330,16 @@ with lib.kernel; {
   CPU_FREQ_GOV_SCHEDUTIL = yes;
   CPU_THERMAL = yes;
 
-  # RISC-V defconfig enables these observability/large-memory
-  # facilities even on this 256 MiB appliance. No board service uses eBPF,
-  # perf, or hugetlbfs; disabling their user-facing gates lets Kconfig remove
-  # dependent leaves transitively instead of maintaining a long blacklist.
+  # Keep profiling available in ordinary images. Enabling the perf interface
+  # does not start a sampling session; pressure metrics help diagnose stalls.
+  PERF_EVENTS = yes;
+  PSI = yes;
+  PSI_DEFAULT_DISABLED = no;
+
+  # No board service uses eBPF or hugetlbfs. Disable their user-facing gates
+  # so Kconfig removes dependent leaves transitively.
   BPF_SYSCALL = no;
   CGROUP_BPF = no;
-  PERF_EVENTS = no;
   HUGETLBFS = no;
 
   # The upstream controller is used as the low-latency doorbell to C906L.

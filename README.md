@@ -58,6 +58,13 @@ AIC8800 Wi-Fi support, audio, camera/ISP/codec drivers, C906L toolchain and
 firmware, and reusable board modules. The NanoKVM web application is packaged
 separately; it is not run by the minimal initrd.
 
+The ordinary SG2002 mainline kernel includes perf events, the SBI/T-Head PMU
+support, and pressure metrics. No profiling-specific kernel is needed. Perf
+recording still starts only when a profiling tool requests it. Synthetic thermal
+injection remains opt-in through `sg2002-kernel-mainline.override {
+thermalEmulation = true; }`; the former `profiling` argument has been removed.
+Existing running kernels retain their compiled configuration until the next boot.
+
 ```sh
 nix develop .#c906l
 nix build .#checks.x86_64-linux.sg2002-c906l-rust-all-timers
