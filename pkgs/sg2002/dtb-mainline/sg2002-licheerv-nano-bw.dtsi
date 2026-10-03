@@ -284,6 +284,18 @@
 };
 
 / {
+	soc {
+		/* The standalone DTB build uses unpatched kernel sources. */
+		efuse: efuse@3050000 {
+			compatible = "sophgo,sg2002-efuse";
+			reg = <0x03050000 0x1000>;
+			clocks = <&clk CLK_EFUSE>, <&clk CLK_APB_EFUSE>;
+			clock-names = "efuse", "apb";
+		};
+	};
+};
+
+/ {
 	/* Generic IIO→hwmon bridge. Names the three SAR-ADC channels
 	 * as voltage inputs; the shim handles raw→millivolt conversion
 	 * using the IIO scale (~0.806 mV/LSB for 12-bit / 3.3 V). */
