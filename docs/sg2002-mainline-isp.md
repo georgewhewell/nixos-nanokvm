@@ -25,9 +25,12 @@ releasing DMA memory. Frame/DMA errors stop and error the queue.
 
 The camera DT enables VPSS as a separate V4L2 mem2mem device, with its own
 fabric-clock references. The bridge's `--isp` option requests NV21 capture and
-imports that allocation into VPSS, which scales and writes NV12 directly into
-the encoder's DMA-BUF. It defaults to quarter resolution (640×360 for GC4653);
-`--size half` selects 1280×720. No CPU demosaic/conversion runs in this mode.
+imports that allocation into VPSS, which scales it into an NV21 DMA-BUF. Coda
+uses its existing CPU staging copy and VU-to-UV conversion to encode it. Direct
+NV12 handoff produces malformed H.264 P-frames with a lit scene; its cause remains
+unresolved. Demosaic and scaling still run in hardware. The default is quarter
+resolution (640×360 for GC4653). `--size half` requests 1280×720, but capture
+STREAMON runs out of the camera profile's 32 MiB media pool at that size.
 
 The bridge passes the capture colour tuple to VPSS and Coda, including the
 extended V4L2 fields. VPSS reports this tuple on both queues because its YUV
@@ -84,6 +87,35 @@ Register references are the pinned CV181x SDK's `vi_reg_fields.h`,
 `vi_reg_blocks.h`, `isp_reg.h`, and the `vi/chip/mars/vip/vi_*_ip_ctrl.c`
 implementations. The mainline patch uses explicit offsets/masks and the
 kernel's own DMA/V4L2 APIs, without the factory module ABI.
+
+## Board evidence: 2026-10-03
+
+The LicheeRV camera on strix-3 was tested with a RAM-only Linux 7.2.8 image and
+the sensor clock assignment moved onto the GC4653 node. This prevents the
+CPUFreq overlay from replacing the camera's assignment: CAM_MCLK1 now reports
+23.76 MHz (the rounded 24 MHz request), with MPLL still at 1 GHz. Five
+full-resolution RAW frames and repeated 30-frame NV21 captures completed.
+
+With a lit scene, the old direct NV12 encoder path completed its requested
+frame count but produced malformed H.264 P-frames. `ffmpeg -v error -xerror`
+rejects the stream. Completion counts alone do not validate encoding.
+
+Selecting VPSS NV21 output and Coda's existing staging path passed three
+300-live-frame runs on the stock drivers, without diagnostic sleeps or kernel
+logging. The final source also passed a separate 30-live-frame restart.
+Strict software decoding passed; `ffprobe` counted 301 and 31 pictures at
+640×360 respectively, including the priming picture. Throughput was about
+23–24 fps. A subsequent 30-frame ISP-only capture also completed. Host format
+and CPUFreq checks, native bridge builds, and RISC-V builds with and without
+PCMA support passed.
+
+This is a conservative workaround for the direct handoff, whose root cause
+remains unresolved. The extra CPU copy is intentional. The 1280×720 request
+failed at capture STREAMON with `ENOMEM` in the 32 MiB media pool; the default
+640×360 path restarted successfully afterwards. Stream restarts can still log
+CSI ECC/CRC/word-count indications, and ISP streamoff still reports its
+partial-frame reset. ISP image tuning and H.264 VUI remain incomplete. No
+storage was flashed.
 
 ## Board evidence: 2026-09-13
 

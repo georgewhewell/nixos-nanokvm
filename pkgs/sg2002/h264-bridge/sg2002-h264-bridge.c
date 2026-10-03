@@ -3296,7 +3296,7 @@ static void usage(const char *program)
 		"  --scaler cpu|vpss    cpu = software UYVY->NVxx (default); vpss = hardware\n"
 		"                       scaler/CSC via the mem2mem node, zero-copy dmabuf chain\n"
 		"  --scaler-node PATH   VPSS mem2mem node (default " DEFAULT_SCALER ")\n"
-		"  --isp               select hardware Bayer->NV21 capture and VPSS->NV12;\n"
+		"  --isp               hardware Bayer->NV21, VPSS scaling, staged NV21 encode;\n"
 		"                       quarter size (640x360 on GC4653), or --size half\n"
 		"  --frames N          stop after N encoded live frames, excluding the one\n"
 		"                       priming picture retained in the stream (default unlimited)\n"
@@ -3456,7 +3456,9 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	if (opts.use_isp) {
 		opts.use_vpss = 1;
-		opts.encoder_input_format = V4L2_PIX_FMT_NV12;
+		/* Direct VPSS-to-Coda NV12 corrupts live H.264 P-frames. Use the
+		 * encoder's existing NV21 staging path until that handoff is fixed. */
+		opts.encoder_input_format = V4L2_PIX_FMT_NV21;
 	}
 	if (opts.use_vpss && opts.max_fps) {
 		fprintf(stderr, "--max-fps is not supported with --scaler vpss\n");
