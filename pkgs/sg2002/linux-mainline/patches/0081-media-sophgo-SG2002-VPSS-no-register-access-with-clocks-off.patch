@@ -1,0 +1,117 @@
+From: yuzi-co <vadim@yuzi.co>
+Date: Sat, 3 Oct 2026 08:52:32 +0300
+Subject: [PATCH] media: sophgo: SG2002 VPSS: no register access with the
+ clocks off
+
+Sipeed's U-Boot can leave VPSS interrupt status bits raised (0x403 on a
+NanoKVM), which holds the shared level-triggered line high. The handler
+was requested before any clock was on, so it ran at once and its status
+read stalled the bus.
+
+Mask every source and clear the status with the clocks on before
+requesting the IRQ, and make the handler return IRQ_NONE while the
+driver has its clocks off. Runtime suspend clears the flag and calls
+synchronize_irq() before it gates the clocks.
+---
+ drivers/media/platform/sophgo/sg2002-vpss.c | 53 +++++++++++++++++----
+ 1 file changed, 45 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/media/platform/sophgo/sg2002-vpss.c b/drivers/media/platform/sophgo/sg2002-vpss.c
+index 114d176..01b437f 100644
+--- a/drivers/media/platform/sophgo/sg2002-vpss.c
++++ b/drivers/media/platform/sophgo/sg2002-vpss.c
+@@ -162,6 +162,7 @@ struct vpss_dev {
+ 	 * silently (single-core store wedge, watchdog reset). */
+ 	struct clk		*clk_axi;
+ 	struct clk		*clk_cfg_reg;
++	bool			clocked;	/* registers are safe to touch */
+ 
+ 	struct mutex		lock;		/* serialises vb2 + job state */
+ 	spinlock_t		irq_lock;	/* guards the in-flight job */
+@@ -849,9 +850,17 @@ static const struct v4l2_m2m_ops vpss_m2m_ops = {
+ static irqreturn_t vpss_isr(int irq, void *data)
+ {
+ 	struct vpss_dev *vpss = data;
+-	u32 raw = vpss_read(vpss, TOP_INTR_STATUS);
+-	u32 status = raw & (INTR_IMG_IN_V_FRAME_END | INTR_SCL1_FRAME_END |
+-			    INTR_PROG_TOO_LATE);
++	u32 raw, status;
++
++	/* The line is shared and level-triggered. With the clocks off a
++	 * register read stalls the bus, so a raise while this driver is
++	 * idle cannot be ours to service. */
++	if (!READ_ONCE(vpss->clocked))
++		return IRQ_NONE;
++
++	raw = vpss_read(vpss, TOP_INTR_STATUS);
++	status = raw & (INTR_IMG_IN_V_FRAME_END | INTR_SCL1_FRAME_END |
++			INTR_PROG_TOO_LATE);
+ 
+ 	if (!raw)
+ 		return IRQ_NONE;
+@@ -995,6 +1004,7 @@ static int vpss_runtime_resume(struct device *dev)
+ 	if (ret)
+ 		return ret;
+ 
++	WRITE_ONCE(vpss->clocked, true);
+ 	vpss_hw_init(vpss);
+ 	return 0;
+ }
+@@ -1003,6 +1013,8 @@ static int vpss_runtime_suspend(struct device *dev)
+ {
+ 	struct vpss_dev *vpss = dev_get_drvdata(dev);
+ 
++	WRITE_ONCE(vpss->clocked, false);
++	synchronize_irq(vpss->irq);
+ 	clk_bulk_disable_unprepare(vpss->num_clks, vpss->clks);
+ 	clk_disable_unprepare(vpss->clk_cfg_reg);
+ 	clk_disable_unprepare(vpss->clk_axi);
+@@ -1041,11 +1053,6 @@ static int vpss_probe(struct platform_device *pdev)
+ 	if (vpss->irq < 0)
+ 		return vpss->irq;
+ 
+-	ret = devm_request_irq(&pdev->dev, vpss->irq, vpss_isr, IRQF_SHARED,
+-			       dev_name(&pdev->dev), vpss);
+-	if (ret)
+-		return ret;
+-
+ 	vpss->num_clks = ARRAY_SIZE(vpss_clk_names);
+ 	vpss->clks = devm_kcalloc(&pdev->dev, vpss->num_clks,
+ 				  sizeof(*vpss->clks), GFP_KERNEL);
+@@ -1064,6 +1071,36 @@ static int vpss_probe(struct platform_device *pdev)
+ 	if (IS_ERR(vpss->clk_cfg_reg))
+ 		return PTR_ERR(vpss->clk_cfg_reg);
+ 
++	/* Firmware can leave a status bit raised (Sipeed's U-Boot runs a boot
++	 * logo), which holds the shared level line high. Clear it with the
++	 * clocks on before the handler can run. */
++	clk_prepare_enable(vpss->clk_axi);
++	clk_prepare_enable(vpss->clk_cfg_reg);
++	ret = clk_bulk_prepare_enable(vpss->num_clks, vpss->clks);
++	if (ret) {
++		clk_disable_unprepare(vpss->clk_cfg_reg);
++		clk_disable_unprepare(vpss->clk_axi);
++		return ret;
++	}
++	dev_dbg(&pdev->dev, "interrupt status at probe: %#x, mask %#x, enable %#x\n",
++		vpss_read(vpss, TOP_INTR_STATUS), vpss_read(vpss, TOP_INTR_MASK),
++		vpss_read(vpss, TOP_INTR_ENABLE));
++	/* Mask every source first: a block firmware left running keeps
++	 * raising its bits, and clearing the status alone does not hold the
++	 * line low. vpss_hw_init unmasks what this driver serves. */
++	vpss_write(vpss, TOP_INTR_MASK, 0);
++	vpss_write(vpss, TOP_INTR_STATUS, 0xffffffff);
++	dev_dbg(&pdev->dev, "interrupt status after masking: %#x\n",
++		vpss_read(vpss, TOP_INTR_STATUS));
++	clk_bulk_disable_unprepare(vpss->num_clks, vpss->clks);
++	clk_disable_unprepare(vpss->clk_cfg_reg);
++	clk_disable_unprepare(vpss->clk_axi);
++
++	ret = devm_request_irq(&pdev->dev, vpss->irq, vpss_isr, IRQF_SHARED,
++			       dev_name(&pdev->dev), vpss);
++	if (ret)
++		return ret;
++
+ 	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(40));
+ 	if (ret)
+ 		return ret;

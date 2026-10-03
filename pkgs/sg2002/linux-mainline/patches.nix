@@ -337,6 +337,10 @@ let
       name = "media-sophgo-align-vpss-format-enumeration";
       patch = ./patches/0068-media-sophgo-align-VPSS-format-enumeration.patch;
     })
+    (patch {
+      name = "media-sophgo-sg2002-vpss-no-register-access-with-clocks-off";
+      patch = ./patches/0081-media-sophgo-SG2002-VPSS-no-register-access-with-clocks-off.patch;
+    })
   ];
 
   meta = {
@@ -412,6 +416,18 @@ let
       upstreamStatus = "draft";
       dropWhen = "Folded into the SG2002 VPSS driver before submission";
       notes = "ENUM_FMT must advertise the same packed/semiplanar source and semiplanar destination formats as S_FMT.";
+    };
+    "media-sophgo-sg2002-vpss-no-register-access-with-clocks-off" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "Folded into the SG2002 VPSS driver before submission";
+      notes = ''
+        Behind Sipeed's U-Boot the VPSS interrupt status reads 0x403 at
+        probe and holds the shared level line high. The handler was
+        requested with the clocks off, ran at once, and its status read
+        hung the bus. Mask and clear with the clocks on before requesting
+        the IRQ; the handler ignores the line while the clocks are off.
+      '';
     };
     "media-sophgo-preserve-vpss-source-colourimetry" = {
       origin = "local";
