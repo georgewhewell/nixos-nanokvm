@@ -25,12 +25,14 @@ releasing DMA memory. Frame/DMA errors stop and error the queue.
 
 The camera DT enables VPSS as a separate V4L2 mem2mem device, with its own
 fabric-clock references. The bridge's `--isp` option requests NV21 capture and
-imports that allocation into VPSS, which scales it into an NV21 DMA-BUF. Coda
-uses its existing CPU staging copy and VU-to-UV conversion to encode it. Direct
-NV12 handoff produces malformed H.264 P-frames with a lit scene; its cause remains
-unresolved. Demosaic and scaling still run in hardware. The default is quarter
-resolution (640×360 for GC4653). `--size half` requests 1280×720, but capture
-STREAMON runs out of the camera profile's 32 MiB media pool at that size.
+imports that allocation into VPSS, which scales it into an NV12 DMA-BUF shared
+with Coda. Demosaic, scaling and encoding run in hardware without a CPU frame
+copy. All three DMA engines live under `/soc` to inherit `dma-noncoherent`;
+placing them at the DT root incorrectly gives Coda a cached userspace output
+mapping, which can return stale H.264 bytes when a buffer is reused. The default
+is quarter resolution (640×360 for GC4653). `--size half` requests 1280×720,
+but capture STREAMON runs out of the camera profile's 32 MiB media pool at
+that size.
 
 The bridge passes the capture colour tuple to VPSS and Coda, including the
 extended V4L2 fields. VPSS reports this tuple on both queues because its YUV
@@ -96,26 +98,49 @@ CPUFreq overlay from replacing the camera's assignment: CAM_MCLK1 now reports
 23.76 MHz (the rounded 24 MHz request), with MPLL still at 1 GHz. Five
 full-resolution RAW frames and repeated 30-frame NV21 captures completed.
 
-With a lit scene, the old direct NV12 encoder path completed its requested
-frame count but produced malformed H.264 P-frames. `ffmpeg -v error -xerror`
-rejects the stream. Completion counts alone do not validate encoding.
+The original root-level media nodes incorrectly inherited the architecture's
+coherent DMA default. Coda's kernel mapping was uncached, but its userspace
+capture mapping was cached. Encoded output contained stale 64-byte cache lines
+from earlier uses of the buffer. Saved, immutable inputs reproduced this with
+both mmap and DMA-BUF NV12 input, without CSI or VPSS running. Changing only
+the output mapping to uncached made a live 300-frame stream pass strict
+software decoding; the cached A/B run failed. The NV21 staging copy had masked
+this bug.
 
-Selecting VPSS NV21 output and Coda's existing staging path passed three
-300-live-frame runs on the stock drivers, without diagnostic sleeps or kernel
-logging. The final source also passed a separate 30-live-frame restart.
-Strict software decoding passed; `ffprobe` counted 301 and 31 pictures at
-640×360 respectively, including the priming picture. Throughput was about
-23–24 fps. A subsequent 30-frame ISP-only capture also completed. Host format
-and CPUFreq checks, native bridge builds, and RISC-V builds with and without
-PCMA support passed.
+Moving Coda, VPSS and CSI under `/soc` restores the inherited
+`dma-noncoherent` setting. A fresh RAM boot with this DT and stock drivers
+passed two 300-live-frame direct NV12 runs at about 29.6 fps. Both complete
+streams passed `ffmpeg -v error -xerror`; `ffprobe` counted 301 pictures at
+640×360, including the priming picture. Offline alternating black/scene replay
+also passed 60 frames each with mmap and DMA-BUF input. A separate
+30-live-frame restart passed strict decoding, followed by a successful
+30-frame ISP-only capture. No staging copy, diagnostic sleep or modified
+kernel module was used for these final tests. DT regression checks require the
+media nodes to inherit the SoC's noncoherent setting.
 
-This is a conservative workaround for the direct handoff, whose root cause
-remains unresolved. The extra CPU copy is intentional. The 1280×720 request
-failed at capture STREAMON with `ENOMEM` in the 32 MiB media pool; the default
-640×360 path restarted successfully afterwards. Stream restarts can still log
-CSI ECC/CRC/word-count indications, and ISP streamoff still reports its
-partial-frame reset. ISP image tuning and H.264 VUI remain incomplete. No
-storage was flashed.
+The 1280×720 request still failed at capture STREAMON with `ENOMEM` in the
+32 MiB media pool; the default 640×360 path restarted successfully afterwards.
+Stream restarts can still log CSI ECC/CRC/word-count indications, and ISP
+streamoff still reports its partial-frame reset. ISP image tuning and H.264
+VUI remain incomplete. No storage was flashed.
+
+The NanoKVM-PCIe attached to router had the same root-level CSI and VPSS
+nodes; its Coda node already inherited the correct setting. With its stock
+Linux 7.2.7 system and a 1080p60 HDMI source, a userspace probe filled the
+first 4 KiB of each mmap capture buffer before queuing it. Across 60 completed
+frames, 2,993 whole 64-byte lines still contained that pattern. A temporary
+module changed only the idle CSI and VPSS devices' DMA coherency flags to the
+noncoherent values supplied by the corrected DT. The same test then found
+zero stale lines. Restoring the original flags reproduced 1,986 stale lines.
+The probe was unloaded afterwards.
+
+With the corrected flags, two HDMI-to-NV12 runs produced 301 strictly
+decodable pictures each at 960×540 and approximately 58–60 fps. The original
+hardware-to-hardware stream also decoded successfully: the demonstrated
+PCIe failure concerns CPU access to captured frames, unlike the camera's
+cached Coda output. PCIe validation used the runtime probe; an attempted
+warm boot into the corrected DT failed and the watchdog recovered the
+original SD system. The camera validation above used the final DT at boot.
 
 ## Board evidence: 2026-09-13
 

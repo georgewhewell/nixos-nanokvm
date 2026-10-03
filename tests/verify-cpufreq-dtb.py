@@ -55,6 +55,16 @@ if sensor in after:
     assert get(scaling, sensor, "assigned-clocks") == get(scaling, sensor, "clocks")
     assert get(scaling, sensor, "assigned-clock-rates") == "24000000"
 
+# Root-level DMA engines miss the SoC's noncoherent setting. Coda's
+# userspace output mapping then returns stale cache lines on buffer reuse.
+# Check both camera and PCIe carrier compositions.
+for name in ("video-codec@b030000", "vpss@a080000", "video-capture@a0c2000"):
+    assert "/" + name not in after
+    node = "/soc/" + name
+    if node in after:
+        assert "dma-noncoherent" in after["/soc"]
+        assert "dma-coherent" not in after[node]
+
 for rate in rates:
     assert pll_rate % rate == 0, f"{rate} is not an integer division of the PLL"
     assert pll_rate // rate <= 15, "CPU divider field is four bits, one-based"

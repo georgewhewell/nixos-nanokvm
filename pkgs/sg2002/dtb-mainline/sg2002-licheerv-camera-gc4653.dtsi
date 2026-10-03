@@ -106,7 +106,10 @@
 		compatible = "sophgo,sg2002-ddr-top", "syscon";
 		reg = <0x0800a000 0x1000>;
 	};
+};
 
+/* All three DMA engines inherit /soc's dma-noncoherent property. */
+&{/soc} {
 	/* The generic SoC node is disabled, and the standalone DTB builder
 	 * consumes an unpatched kernel source. Keep the complete enabled node
 	 * here, sharing the deterministic media pool with CSI capture. */
