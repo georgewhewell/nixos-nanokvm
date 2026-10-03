@@ -28,7 +28,10 @@ on standard vector support, which this device tree does not advertise.
 
 ## Kernel support and policy
 
-The carrier device trees describe `xtheadvector` and `thead,vlenb = <16>`.
+Kernel patch 0085 describes `xtheadvector` and `thead,vlenb = <16>` in
+`sg2002.dtsi`, so the capability belongs to the SoC. The standalone DTB
+builder applies the same patch to its kernel source. It does not infer
+CPU capabilities from a carrier or from the shared CV180x CPU description.
 The kernel includes upstream vector context handling and its Ghostwrite
 mitigation. **Normal boots still disable XTheadVector access** and report:
 
@@ -97,3 +100,13 @@ keep vector access disabled.
 References: [XuanTie ISA specification](https://github.com/XUANTIE-RV/thead-extension-spec/blob/master/xtheadvector.adoc),
 [Linux vector context handling](https://github.com/torvalds/linux/blob/master/arch/riscv/include/asm/vector.h),
 [Linux Ghostwrite policy](https://github.com/torvalds/linux/blob/master/arch/riscv/kernel/bugs.c).
+
+## Device-tree composition
+
+Nano variants start from the upstream LicheeRV Nano B DTS. NanoKVM-PCIe
+starts from its own board DTS and directly includes `sg2002.dtsi`.
+Both compositions explicitly include the common peripheral enablement,
+Sipeed USB/IIC0 settings and shared AIC8800 wiring. The B-W overlay now
+contains only the Nano B-W identity; PCIe no longer inherits that model
+or its compatible strings. Camera, display and auxiliary-core overlays
+remain specific to their selected carrier/profile.

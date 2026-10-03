@@ -1,21 +1,10 @@
-# Mainline DTBs for the Sipeed LicheeRV Nano B-W variant.
-#
-# Starts from the upstream `sg2002-licheerv-nano-b.dts` in the mainline
-# kernel tree (passed in as `linuxSrc`) and concatenates one or more
-# overlay dtsi files — dtc merges nodes, so later properties replace
-# earlier ones. All variants include the shared CPUFreq/thermal description.
-# The basic outputs are:
-#
-#   .dtb     — bw.dtsi (default: WiFi/SDIO1 enabled).
-#   .dtbOled — bw.dtsi + bw-oled.dtsi (SDIO1 disabled, IIC1 + SH1107
-#              child on the freed-up SD1 pads). Pair with builds that
-#              also turn sg2002.wifi.enable off.
-#   .dtbs    — directory-shaped wrapper for NixOS's
-#              `hardware.deviceTree.package` (covers the default DTB).
+# Mainline SG2002 DTBs: explicit Nano and NanoKVM-PCIe board bases.
+# Local peripheral and board overlays are merged after the kernel DTS.
 { lib
 , runCommand
 , dtc
 , gcc
+, patch
 , linuxSrc
 , python3
 , writeText
@@ -27,14 +16,16 @@ let
   # — `toString [path1 path2]` doesn't trigger Nix's path-to-store import,
   # it just stringifies the raw source paths, which are then missing from
   # the build's closure. `${p}` per element does the import.
-  buildDtb = name: overlays:
+  buildDtb = baseDts: name: overlays:
     runCommand "${name}.dtb"
       {
-        nativeBuildInputs = [ dtc gcc ];
+        nativeBuildInputs = [ dtc gcc patch ];
       } ''
       tar -xf ${linuxSrc}
       SRC=$(echo linux-*/)
-      DTS=$SRC/arch/riscv/boot/dts/sophgo/sg2002-licheerv-nano-b.dts
+      # Match the SoC description applied by the kernel patch queue.
+      patch -d "$SRC" -p1 < ${../linux-mainline/patches/0085-riscv-dts-sophgo-describe-sg2002-xtheadvector.patch}
+      DTS=${if builtins.isPath baseDts then "${baseDts}" else "$SRC/arch/riscv/boot/dts/sophgo/${baseDts}"}
 
       cat "$DTS" ${lib.concatMapStringsSep " " (p: "${p}") overlays} \
         ${./sg2002-cpufreq.dtsi} > merged.dts
@@ -47,16 +38,26 @@ let
       dtc -I dts -O dtb -o "$out" merged.pre.dts
     '';
 
-  dtb = buildDtb "sg2002-licheerv-nano-bw" [
+  nanoBase = "sg2002-licheerv-nano-b.dts";
+  pcieBase = ./sg2002-nanokvm-pcie.dts;
+  commonOverlays = [
+    ./sg2002-peripherals.dtsi
+    ./sg2002-sipeed-common.dtsi
+    ./sg2002-aic8800.dtsi
+  ];
+  buildNanoDtb = name: overlays: buildDtb nanoBase name (commonOverlays ++ overlays);
+  buildPcieDtb = name: overlays: buildDtb pcieBase name (commonOverlays ++ overlays);
+
+  dtb = buildNanoDtb "sg2002-licheerv-nano-bw" [
     ./sg2002-licheerv-nano-bw.dtsi
   ];
 
-  dtbOled = buildDtb "sg2002-licheerv-nano-bw-oled" [
+  dtbOled = buildNanoDtb "sg2002-licheerv-nano-bw-oled" [
     ./sg2002-licheerv-nano-bw.dtsi
     ./sg2002-licheerv-nano-bw-oled.dtsi
   ];
 
-  dtbNoWifi = buildDtb "sg2002-licheerv-nano-bw-nowifi" [
+  dtbNoWifi = buildNanoDtb "sg2002-licheerv-nano-bw-nowifi" [
     ./sg2002-licheerv-nano-bw.dtsi
     ./sg2002-licheerv-nano-bw-nowifi.dtsi
   ];
@@ -95,10 +96,10 @@ let
   # an atomic pair: Linux must never allocate from the final 2 MiB while the
   # auxiliary core is executing there, and Linux must never activate a lease
   # unless every generated identity field matches the running firmware.
-  buildC906LDtb = name: carrierOverlays: contract:
+  buildC906LDtb = baseDts: name: carrierOverlays: contract:
     let
-      unchecked = buildDtb "${name}-${contract.profileName}-unchecked"
-        (carrierOverlays ++ [ "${contract}/dts/sg2002-c906l-contract.dtsi" ]);
+      unchecked = buildDtb baseDts "${name}-${contract.profileName}-unchecked"
+        (commonOverlays ++ carrierOverlays ++ [ "${contract}/dts/sg2002-c906l-contract.dtsi" ]);
       expectedCapabilities = contract.requiredCapabilities;
       dormantCapabilities = contract.dormantCapabilities;
       leaseMask = contract.leaseMask;
@@ -178,7 +179,7 @@ let
         --dtb "$out"
     '';
 
-  dtbNoWifiC906LFor = buildC906LDtb
+  dtbNoWifiC906LFor = buildC906LDtb nanoBase
     "sg2002-licheerv-nano-bw-nowifi-c906l"
     [
       ./sg2002-licheerv-nano-bw.dtsi
@@ -186,7 +187,7 @@ let
     ];
 
   # LicheeRV-Nano with the RJ45 wired: gmac0 + internal EPHY on.
-  dtbEth = buildDtb "sg2002-licheerv-nano-bw-eth" [
+  dtbEth = buildNanoDtb "sg2002-licheerv-nano-bw-eth" [
     ./sg2002-licheerv-nano-bw.dtsi
     ./sg2002-licheerv-eth.dtsi
   ];
@@ -195,12 +196,12 @@ let
   # runs high-speed (validated on the Nano W, 2026-09-19); these keep the
   # old 12 Mbit/s link for A/B diagnostics and for host ports that fail
   # high-speed enumeration.
-  dtbFullSpeed = buildDtb "sg2002-licheerv-nano-bw-full-speed" [
+  dtbFullSpeed = buildNanoDtb "sg2002-licheerv-nano-bw-full-speed" [
     ./sg2002-licheerv-nano-bw.dtsi
     ./sg2002-usb-full-speed.dtsi
   ];
 
-  dtbNoWifiFullSpeed = buildDtb "sg2002-licheerv-nano-bw-nowifi-full-speed" [
+  dtbNoWifiFullSpeed = buildNanoDtb "sg2002-licheerv-nano-bw-nowifi-full-speed" [
     ./sg2002-licheerv-nano-bw.dtsi
     ./sg2002-licheerv-nano-bw-nowifi.dtsi
     ./sg2002-usb-full-speed.dtsi
@@ -210,7 +211,7 @@ let
   # ST7789 SPI panel and its three GPIO control lines. USB runs high-speed;
   # a silent bulk-IN stall seen once at high speed was never root-caused,
   # and only a host-side port reset recovers it.
-  dtbPicoClawLcd = buildDtb "sg2002-licheerv-nano-picoclaw-lcd" [
+  dtbPicoClawLcd = buildNanoDtb "sg2002-licheerv-nano-picoclaw-lcd" [
     ./sg2002-licheerv-nano-bw.dtsi
     ./sg2002-licheerv-nano-bw-nowifi.dtsi
     ./sg2002-licheerv-nano-picoclaw-lcd.dtsi
@@ -219,7 +220,7 @@ let
   # PicoClaw WiFi-root variant: retain the B-W board's SDIO1/AIC8800
   # wiring while adding the ST7789 panel. The LCD consumes SPI1/GPIOs,
   # not the SDIO1 pins, so the overlays can coexist.
-  dtbPicoClawLcdWifi = buildDtb "sg2002-licheerv-nano-picoclaw-lcd-wifi" [
+  dtbPicoClawLcdWifi = buildNanoDtb "sg2002-licheerv-nano-picoclaw-lcd-wifi" [
     ./sg2002-licheerv-nano-bw.dtsi
     ./sg2002-licheerv-nano-picoclaw-lcd.dtsi
   ];
@@ -265,7 +266,7 @@ let
           };
         };
       '';
-      composed = buildC906LDtb
+      composed = buildC906LDtb nanoBase
         "sg2002-licheerv-nano-picoclaw-c906l-lcd"
         [
           ./sg2002-licheerv-nano-bw.dtsi
@@ -357,24 +358,22 @@ let
       fi
     '';
 
-  # NanoKVM-PCIe: bw.dtsi (WiFi/SDIO1 on) + ethernet enable overlay.
-  dtbPcie = buildDtb "sg2002-nanokvm-pcie" [
-    ./sg2002-licheerv-nano-bw.dtsi
+  # NanoKVM-PCIe: its own board base, WiFi wiring and carrier peripherals.
+  dtbPcie = buildPcieDtb "sg2002-nanokvm-pcie" [
     ./sg2002-nanokvm-pcie.dtsi
   ];
 
   # LicheeRV-Nano with the GC4653 camera FFC: ethernet + camera overlay
   # (IIC4 on PWR_WAKEUP0/PWR_BUTTON1, CAM_MCLK1 on MIPIRX0N, sensor reset
   # on GPIOE1, 2-lane CSI capture).
-  dtbCam = buildDtb "sg2002-licheerv-nano-bw-cam" [
+  dtbCam = buildNanoDtb "sg2002-licheerv-nano-bw-cam" [
     ./sg2002-licheerv-nano-bw.dtsi
     ./sg2002-licheerv-nano-bw-nowifi.dtsi
     ./sg2002-licheerv-eth.dtsi
     ./sg2002-licheerv-camera-gc4653.dtsi
   ];
 
-  dtbPcieNoWifi = buildDtb "sg2002-nanokvm-pcie-nowifi" [
-    ./sg2002-licheerv-nano-bw.dtsi
+  dtbPcieNoWifi = buildPcieDtb "sg2002-nanokvm-pcie-nowifi" [
     ./sg2002-nanokvm-pcie.dtsi
     ./sg2002-licheerv-nano-bw-nowifi.dtsi
   ];
@@ -387,10 +386,9 @@ let
   # most of the carrier hardware.
   dtbPcieNoWifiC906LFor = contract:
     let
-      composed = buildC906LDtb
+      composed = buildC906LDtb pcieBase
         "sg2002-nanokvm-pcie-nowifi-c906l"
         [
-          ./sg2002-licheerv-nano-bw.dtsi
           ./sg2002-nanokvm-pcie.dtsi
           ./sg2002-licheerv-nano-bw-nowifi.dtsi
         ]
@@ -417,6 +415,8 @@ let
         };
       } ''
       cp ${composed} "$out"
+      test "$(fdtget -t s "$out" / model)" = "Sipeed NanoKVM-PCIe"
+      test "$(fdtget -t s "$out" / compatible)" = "sipeed,nanokvm-pcie sophgo,sg2002"
       test "$(fdtget -t s "$out" /soc/ethernet@4070000 status)" = okay
       test "$(fdtget -t s "$out" /soc/mmc@4310000 status)" = okay
       test "$(fdtget -t s "$out" /soc/i2c@4040000 status)" = okay
@@ -427,8 +427,7 @@ let
 
   # NanoKVM-PCIe full-speed fallback; the carrier's high-speed link has
   # not been separately validated, so this remains available for A/Bs.
-  dtbPcieFullSpeed = buildDtb "sg2002-nanokvm-pcie-full-speed" [
-    ./sg2002-licheerv-nano-bw.dtsi
+  dtbPcieFullSpeed = buildPcieDtb "sg2002-nanokvm-pcie-full-speed" [
     ./sg2002-nanokvm-pcie.dtsi
     ./sg2002-usb-full-speed.dtsi
   ];

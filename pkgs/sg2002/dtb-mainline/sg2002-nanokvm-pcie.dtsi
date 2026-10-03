@@ -6,9 +6,8 @@
  * "disabled"` (the LicheeRV-Nano dev board has no ethernet). The
  * NanoKVM-PCIe carrier wires the GMAC to the RJ45, so enable them.
  *
- * Layered on top of sg2002-licheerv-nano-bw.dtsi, which already keeps
- * SDIO1 (AIC8800 WiFi) enabled — so this DTB carries both ethernet,
- * WiFi and the front-panel OLED for the PCIe board.
+ * Composed with sg2002-nanokvm-pcie.dts and the shared AIC8800 wiring.
+ * This overlay describes the carrier peripherals and external connections.
  */
 
 /*
@@ -89,10 +88,8 @@
 	};
 };
 
-/* SD card slot on sdhci0 (mmc@4310000). Upstream cv180x.dtsi leaves it
- * disabled and the base bw.dtsi only wires sdhci1 (SDIO/WiFi), so Linux
- * never saw the card — blocking both booting from SD and writing it.
- * Pins/props cribbed from upstream sg2002-licheerv-nano-b.dts. */
+/* SD card slot on sdhci0 (mmc@4310000), including the PCIe carrier
+ * power switch, clock setup and card-detect workaround. */
 &pinctrl {
 	sdhci0_cfg: sdhci0-cfg {
 		sdhci0-clk-pins {

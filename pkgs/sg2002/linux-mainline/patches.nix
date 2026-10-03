@@ -42,6 +42,10 @@ let
 
   patches = [
     (patch {
+      name = "riscv-dts-sophgo-describe-sg2002-xtheadvector";
+      patch = ./patches/0085-riscv-dts-sophgo-describe-sg2002-xtheadvector.patch;
+    })
+    (patch {
       name = "riscv-preserve-xtheadvector-state-across-fpu-switches";
       patch = ./patches/0082-riscv-preserve-xtheadvector-state-across-fpu-switches.patch;
     })
@@ -348,6 +352,12 @@ let
   ];
 
   meta = {
+    "riscv-dts-sophgo-describe-sg2002-xtheadvector" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "upstream sg2002.dtsi describes xtheadvector and its 16-byte VLENB";
+      notes = "Main C906 hardware capability, shared by all SG2002 carriers; also applied by the standalone DTB builder.";
+    };
     "riscv-preserve-xtheadvector-state-across-fpu-switches" = {
       origin = "local";
       upstreamStatus = "draft";

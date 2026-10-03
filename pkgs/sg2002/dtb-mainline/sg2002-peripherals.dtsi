@@ -1,0 +1,307 @@
+/* Common SG2002 peripheral enablement for the local driver patches.
+ * Board identities and external pin routing belong in board descriptions.
+ * CPU capabilities come from the patched kernel sg2002.dtsi. */
+
+#include <dt-bindings/clock/sophgo,cv1800.h>
+
+/* DesignWare WDT at 0x03010000. Upstream sg2002.dtsi has every piece
+ * in place (CLK_APB_WDT=58 in the clock header, the RST_WDT=48 reset
+ * line, dw_wdt driver + snps,dw-wdt binding) except this node — add
+ * it so the kernel binds /dev/watchdog0. systemd then pets it via
+ * RuntimeWatchdogSec=30s (see modules/includes/usb-recovery.nix).
+ * Reset id is the literal 48 because RST_WDT from cv18xx-reset.h
+ * isn't exposed as a UAPI dt-bindings header. */
+/* The SNPS AXI DMA controller is `status = "disabled"` by default in
+ * upstream cv180x.dtsi. Enable it here — audio (i2s → ADC/DAC) needs
+ * DMA channels via the dmamux. Without this the dw_axi_dmac driver
+ * never binds and every DMA-using child defers probe.
+ *
+ * Override compatible to `sophgo,cv1800b-axi-dma` (paired with the
+ * dw-axi-dmac CV1800B-support kernel patch). With the generic
+ * `snps,axi-dma-1.01a`, dw_axi_dma_of_xlate calls
+ * dma_get_any_slave_channel() which picks any free channel — but the
+ * dmamux registers the I2S handshake against a *specific* channel ID.
+ * The mismatch means transfers fire on the wrong channel and IRQs
+ * never come back, so arecord opens cleanly then reads return -EIO. */
+&dmac {
+	compatible = "sophgo,cv1800b-axi-dma";
+	status = "okay";
+};
+
+&{/soc} {
+	watchdog: watchdog@3010000 {
+		compatible = "snps,dw-wdt";
+		reg = <0x03010000 0x1000>;
+		clocks = <&clk CLK_APB_WDT>;
+		resets = <&rst 48>;
+		/* CV1800/SG2002 synthesizes the WDT IP with
+		 * WDT_USE_FIX_TOP=0 (i.e. programmable TOPs) but doesn't
+		 * publish the synthesis-time TOP values via DT, so the
+		 * dw_wdt driver warns "No valid TOPs array specified" and
+		 * falls back to its private dw_wdt_fix_tops (1<<16..1<<31).
+		 * Empirically the silicon honours those exact values —
+		 * verified by reading WDT_CCVR after a kick at top_val=14:
+		 * counter reloads to 0x40000000 = 1<<30 = 42.95 s at the
+		 * 25 MHz CLK_APB_WDT, matching dw_wdt_fix_tops[14]. So
+		 * declare them explicitly; this just suppresses the warning
+		 * and locks the driver/hardware contract. */
+		snps,watchdog-tops = <0x00010000 0x00020000 0x00040000 0x00080000
+				      0x00100000 0x00200000 0x00400000 0x00800000
+				      0x01000000 0x02000000 0x04000000 0x08000000
+				      0x10000000 0x20000000 0x40000000 0x80000000>;
+		/* Use the largest practical DesignWare TOP as the default.
+		 * Without this, dw_wdt starts from its generic 30-second
+		 * default, which is too tight for slow SG2002 bring-up paths. */
+		timeout-sec = <85>;
+		status = "okay";
+	};
+
+	/* On-die "tempsen" sensor. Driver in our 0006 kernel patch
+	 * (backport of Haylen Chu's v5 LKML series); compatible
+	 * sophgo,cv1800-thermal. The driver requires the IRQ for
+	 * thermal-zone trip notifications — without an `interrupts`
+	 * property, platform_get_irq() in probe returns -ENXIO and the
+	 * driver bails. SOC_PERIPHERAL_IRQ(0) corresponds to PLIC
+	 * input 16, the tempsen line per vendor cv181x_riscv DT. */
+	soc_temp: thermal-sensor@30e0000 {
+		compatible = "sophgo,cv1800-thermal";
+		reg = <0x030e0000 0x100>;
+		clocks = <&clk CLK_TEMPSEN>;
+		interrupts = <SOC_PERIPHERAL_IRQ(0) IRQ_TYPE_LEVEL_HIGH>;
+		#thermal-sensor-cells = <0>;
+		status = "okay";
+	};
+};
+
+/* Auxiliary SAR-ADC at 0x030F0000. Upstream cv180x.dtsi already
+ * declares it disabled with three channels @0..2 — only PIN_ADC1
+ * is broken out as a dedicated analog pad on the SG2002 pin set
+ * (channels 0 and 2 land on internal nets), but enabling all
+ * three is harmless and lets the channels appear under
+ * /sys/bus/iio/devices/iio:device0. The iio-hwmon shim below
+ * also re-exposes them as in1_input..in3_input under
+ * /sys/class/hwmon/hwmonN/ so `sensors` and friends pick them up. */
+&saradc {
+	/* `#io-channel-cells` is missing from the upstream saradc node
+	 * — add it here so iio-hwmon (and any other iio-consumer) can
+	 * reference channels via `io-channels = <&saradc N>`. The
+	 * sophgo,cv1800b-saradc binding YAML doesn't list it, so this
+	 * is also worth upstreaming once we get around to it. */
+	#io-channel-cells = <1>;
+	status = "okay";
+};
+
+/ {
+	/* Generic IIO→hwmon bridge. Names the three SAR-ADC channels
+	 * as voltage inputs; the shim handles raw→millivolt conversion
+	 * using the IIO scale (~0.806 mV/LSB for 12-bit / 3.3 V). */
+	saradc_hwmon: iio-hwmon {
+		compatible = "iio-hwmon";
+		io-channels = <&saradc 0>, <&saradc 1>, <&saradc 2>;
+	};
+};
+
+/* PWM IP — four instances at 0x03060000..0x03063000, each with 4
+ * channels (16 channels total exposed as /sys/class/pwm/pwmchip0..3).
+ * Driver in patches/0008 (sophgo,cv1800-pwm). Pinctrl on the SG2002
+ * pad set is sparse for PWM — only PIN_PWM0_BUCK is dedicated;
+ * other channels reach external pads only via re-muxing UART/etc
+ * pads, which is board-specific. Enabled at the IP level here so
+ * /sys/class/pwm exists; pad routing is left for the operator
+ * (devmem the relevant pinmux register, or add a pinctrl group). */
+&{/soc} {
+	pwm0: pwm@3060000 {
+		compatible = "sophgo,cv1800-pwm";
+		reg = <0x03060000 0x1000>;
+		clocks = <&clk CLK_PWM>;
+		#pwm-cells = <3>;
+		status = "okay";
+	};
+	pwm1: pwm@3061000 {
+		compatible = "sophgo,cv1800-pwm";
+		reg = <0x03061000 0x1000>;
+		clocks = <&clk CLK_PWM>;
+		#pwm-cells = <3>;
+		status = "okay";
+	};
+	pwm2: pwm@3062000 {
+		compatible = "sophgo,cv1800-pwm";
+		reg = <0x03062000 0x1000>;
+		clocks = <&clk CLK_PWM>;
+		#pwm-cells = <3>;
+		status = "okay";
+	};
+	pwm3: pwm@3063000 {
+		compatible = "sophgo,cv1800-pwm";
+		reg = <0x03063000 0x1000>;
+		clocks = <&clk CLK_PWM>;
+		#pwm-cells = <3>;
+		status = "okay";
+	};
+};
+
+&{/soc} {
+	/* Audio data path on the cv1800b/SG2002 — verified against
+	 * vendor build/boards/default/dts/sg200x/soph_base.dtsi:
+	 *
+	 *   I2S0 (0x04100000)  rx-only  → wired to internal RXADC
+	 *                                 (capability="rx")
+	 *   I2S1, I2S2                  → generic external I2S
+	 *                                 (NOT connected to internal codec)
+	 *   I2S3 (0x04130000)  tx-only  → wired to internal TXDAC
+	 *                                 (capability="tx", mclk_out="true"
+	 *                                  feeds MCLK to BOTH ADC and DAC)
+	 *
+	 * The mainline `sophgo,cv1800b-i2s.yaml` example shows I2S1 — that's
+	 * an arbitrary external-codec example, NOT the internal-codec path.
+	 * Wiring the internal ADC to I2S1 produced full DMA buffers of zero
+	 * (I2S1 isn't physically connected to the on-die codec; the FIFO
+	 * read returned whatever was on the unconnected external pins).
+	 *
+	 * For mainline 7.0 capture to work on this board we must:
+	 *   - ADC dai-link goes through I2S0 (rx)
+	 *   - DAC dai-link goes through I2S3 (tx) AND drives MCLK out
+	 */
+	i2s0: i2s@4100000 {
+		compatible = "sophgo,cv1800b-i2s";
+		reg = <0x04100000 0x10000>;
+		clocks = <&clk CLK_APB_I2S0>, <&clk CLK_SDMA_AUD0>;
+		clock-names = "i2s", "mclk";
+		dmas = <&dmamux 0 1>;
+		dma-names = "rx";
+		#sound-dai-cells = <0>;
+		status = "okay";
+	};
+
+	i2s3: i2s@4130000 {
+		compatible = "sophgo,cv1800b-i2s";
+		reg = <0x04130000 0x10000>;
+		clocks = <&clk CLK_APB_I2S3>, <&clk CLK_SDMA_AUD3>;
+		clock-names = "i2s", "mclk";
+		dmas = <&dmamux 7 1>;
+		dma-names = "tx";
+		#sound-dai-cells = <0>;
+		status = "okay";
+	};
+
+	audio_dac: audio-codec@300a000 {
+		compatible = "sophgo,cv1800b-sound-dac";
+		reg = <0x0300a000 0x100>;
+		#sound-dai-cells = <0>;
+		status = "okay";
+	};
+
+	audio_adc: audio-codec@300a100 {
+		compatible = "sophgo,cv1800b-sound-adc";
+		reg = <0x0300a100 0x100>;
+		#sound-dai-cells = <0>;
+		status = "okay";
+	};
+};
+
+/ {
+	/* Thermal zone bound to the on-die tempsen above. Driver
+	 * requires devm_thermal_of_zone_register() to find a zone
+	 * referencing the sensor; without this it returns -ENODEV.
+	 * SG2002 Preliminary Datasheet v1.0-alpha, section 2.5.2 note 3
+	 * (p. 27) and section 2.5.5 (p. 32), limits packaged DRAM to
+	 * 115 °C. Request reboot at 105 °C to leave nominal margin;
+	 * this firmware has no working power-off handler. The
+	 * 1 s polling delay is borrowed from vendor; the cv1800
+	 * driver also fires the zone via threshold IRQ when trips
+	 * are crossed, so polling is just a fallback. */
+	thermal-zones {
+		soc-thermal {
+			polling-delay = <1000>;
+			polling-delay-passive = <1000>;
+			thermal-sensors = <&soc_temp>;
+			critical-action = "reboot";
+
+			trips {
+				soc_crit: soc-crit {
+					temperature = <105000>; /* mC */
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+	};
+
+	sound {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "sg2002-onboard";
+		simple-audio-card,format = "i2s";
+		/* The cv1800b internal ADC needs mclk_rate set before
+		 * hw_params can compute its BCLK divider. Without
+		 * mclk-fs, simple-card never calls set_sysclk on the
+		 * codec → adc_setbclk_div errors with "could not set
+		 * rate, check DT node for fixed clock". 256 → mclk =
+		 * 256 * rate; at 48 kHz that's 12.288 MHz, divided
+		 * down from the 221.184 MHz I2S sysclk by mclk_div=18. */
+		simple-audio-card,mclk-fs = <256>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		/* DAC dai-link uses I2S3 (TX path to internal TXDAC).
+		 * `system-clock-direction-out` on the I2S3 cpu node tells
+		 * cv1800b_i2s_dai_set_sysclk to also enable CLK_MCLK_OUT_EN
+		 * — the internal RXADC takes its MCLK from I2S3, so this
+		 * has to be on for capture to work even though the ADC
+		 * link uses a different I2S (I2S0). The DAC link runs
+		 * first when both are open simultaneously; for capture-
+		 * only flows the ADC link's startup also opens the DAC
+		 * link in simple-card so MCLK is gated up either way.
+		 *
+		 * The cv1800b-i2s driver only accepts CBP_CFP (codec
+		 * provider) or CBC_CFC (cpu provider). With no master
+		 * phandles, simple-card picks CBC_CFC — I2S3 generates
+		 * BCLK/FCLK and the on-die DAC follows. The ADC always
+		 * drives its own clocks, so link@1 names it provider. */
+		simple-audio-card,dai-link@0 {
+			reg = <0>;
+			format = "i2s";
+			/* I2S3 = TX-only, internal-DAC data path AND the
+			 * MCLK source the on-die ADC also uses. Mark its
+			 * cpu node clock-direction-out so the i2s driver
+			 * sets CLK_MCLK_OUT_EN.
+			 *
+			 * `system-clock-frequency = <12288000>` short-
+			 * circuits simple_util_parse_clk's last-resort
+			 * fallback, which otherwise reads the first clock
+			 * from the i2s node (CLK_APB_I2S3 @ 300 MHz from
+			 * the AXI4 bus) and uses *that* as simple_dai->
+			 * sysclk. simple-card's init_dai then calls
+			 * set_sysclk(300M) at probe time, which leaves
+			 * CLK_SDMA_AUD0/3 (the actual mclk) in a bypass-
+			 * pinned state from which the runtime
+			 * set_sysclk(12.288M) returns -EINVAL. Pinning
+			 * sysclk to mclk-fs × 48000 here keeps
+			 * everything consistent. Side-effect: locks the
+			 * card to 48 kHz; revisit if we need other rates. */
+			cpu {
+				sound-dai = <&i2s3>;
+				system-clock-direction-out;
+				system-clock-frequency = <12288000>;
+			};
+			codec { sound-dai = <&audio_dac>; };
+		};
+
+		simple-audio-card,dai-link@1 {
+			reg = <1>;
+			format = "i2s";
+			/* I2S0 = RX-only, internal-ADC data path. MCLK
+			 * comes from I2S3 (above). Same parse_clk fallback
+			 * trap as link@0; pin sysclk to 12.288 MHz.
+			 *
+			 * I2S0 must not generate clocks here too, or it
+			 * samples the ADC's frame at an arbitrary offset. */
+			bitclock-master = <&adc_link_codec>;
+			frame-master = <&adc_link_codec>;
+			cpu {
+				sound-dai = <&i2s0>;
+				system-clock-frequency = <12288000>;
+			};
+			adc_link_codec: codec { sound-dai = <&audio_adc>; };
+		};
+	};
+};
