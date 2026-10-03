@@ -231,15 +231,16 @@ with lib.kernel; {
   # /sys/bus/iio/devices/iio:device0/in_voltage{0,1,2}_raw,
   # plus — via the iio-hwmon shim and the matching DT node in
   # sg2002-licheerv-nano-bw.dtsi — under /sys/class/hwmon/hwmonN/
-  # as in1_input..in3_input millivolts (so `sensors` etc. work).
+  # as in1_input..in3_input. The hard-coded 3.3 V reference is not
+  # calibrated; these are not established board voltage measurements.
   IIO = yes;
   SOPHGO_CV1800B_ADC = yes;
   SENSORS_IIO_HWMON = yes;
 
-  # I2C bus 0 — the only I2C with a dedicated pin pair on the SG2002
-  # pad set (PIN_IIC0_SCL/SDA). Built-in + the chardev so userspace
-  # gets /dev/i2c-0 for i2cdetect / i2cget directly. dwc-i2c is the
-  # snps,designware-i2c driver.
+  # DesignWare I2C controllers: IIC0 has a dedicated pair and IIC1..4
+  # have alternate-function routes. Board overlays select the pins
+  # and clients (including the IIC1 OLED and IIC4 camera). Built-in
+  # with the chardev for userspace access to each enabled bus.
   I2C = yes;
   I2C_CHARDEV = yes;
   I2C_DESIGNWARE_PLATFORM = yes;
