@@ -265,39 +265,32 @@
 	};
 };
 
-/* Auxiliary SAR-ADC at 0x030F0000. Upstream cv180x.dtsi already
- * declares it disabled with three channels @0..2 — only PIN_ADC1
- * is broken out as a dedicated analog pad on the SG2002 pin set
- * (channels 0 and 2 land on internal nets), but enabling all
- * three is harmless and lets the channels appear under
- * /sys/bus/iio/devices/iio:device0. The iio-hwmon shim below
- * also re-exposes them as in1_input..in3_input under
- * /sys/class/hwmon/hwmonN/ so `sensors` and friends pick them up. */
+/* Auxiliary SAR-ADC at 0x030F0000. The upstream driver exposes
+ * zero-based IIO channels 0..2 for hardware channels 1..3; ADC1
+ * therefore corresponds to IIO channel 0 (result register 0x14).
+ * Only ADC1 is bonded out in the SG2002 active domain. The other
+ * readings are not documented board voltage monitors. Pin routing,
+ * reference selection and calibration still need board validation;
+ * enabling the controller alone does not establish valid voltages. */
 &saradc {
-	/* `#io-channel-cells` is missing from the upstream saradc node
-	 * — add it here so iio-hwmon (and any other iio-consumer) can
-	 * reference channels via `io-channels = <&saradc N>`. The
-	 * sophgo,cv1800b-saradc binding YAML doesn't list it, so this
-	 * is also worth upstreaming once we get around to it. */
-	#io-channel-cells = <1>;
 	status = "okay";
 };
 
 / {
-	/* Generic IIO→hwmon bridge. Names the three SAR-ADC channels
-	 * as voltage inputs; the shim handles raw→millivolt conversion
-	 * using the IIO scale (~0.806 mV/LSB for 12-bit / 3.3 V). */
+	/* Generic IIO→hwmon bridge. The upstream driver hard-codes a
+	 * 3300/4096 mV scale without reading reference selection/trim.
+	 * These nominal values are not calibrated board measurements. */
 	saradc_hwmon: iio-hwmon {
 		compatible = "iio-hwmon";
 		io-channels = <&saradc 0>, <&saradc 1>, <&saradc 2>;
 	};
 };
 
-/* I2C0 on the dedicated IIC0 pair (the only I2C with bonded-out
- * pads on the SG2002). After enable, /dev/i2c-0 is available for
- * userspace tools (i2cdetect / i2cget / i2cset). The four other
- * I2C controllers in the IP exist in silicon but the SG2002 pad
- * mux doesn't expose them, so they stay disabled. */
+/* I2C0 on the dedicated IIC0 pair. IIC1..4 also have external
+ * alternate-function routes, selected by carrier-specific overlays:
+ * the OLED uses IIC1 on SD1_D3/D0 and the camera uses IIC4 on
+ * PWR_WAKEUP0/PWR_BUTTON1. Their pins can conflict with SDIO,
+ * camera, display or other clients, so leave routing to each board. */
 &i2c0 {
 	pinctrl-0 = <&i2c0_cfg>;
 	pinctrl-names = "default";

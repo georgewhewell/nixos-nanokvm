@@ -42,6 +42,10 @@ let
 
   patches = [
     (patch {
+      name = "dt-bindings-iio-adc-sophgo-describe-channel-consumers";
+      patch = ./patches/0082-dt-bindings-iio-adc-sophgo-describe-channel-consumers.patch;
+    })
+    (patch {
       name = "clk-cv18xx-check-pll-lock-status";
       patch = ./patches/0074-clk-cv18xx-check-pll-lock-status.patch;
     })
@@ -340,6 +344,12 @@ let
   ];
 
   meta = {
+    "dt-bindings-iio-adc-sophgo-describe-channel-consumers" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "The CV1800B SARADC binding and SoC node describe IIO consumers upstream";
+      notes = "The one-cell argument selects the driver's zero-based channel index.";
+    };
     "clk-cv18xx-check-pll-lock-status" = {
       origin = "local";
       upstreamStatus = "draft";
