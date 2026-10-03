@@ -273,6 +273,9 @@
  * reference selection and calibration still need board validation;
  * enabling the controller alone does not establish valid voltages. */
 &saradc {
+	/* The standalone DTB builder uses unpatched kernel sources. Keep
+	 * this alongside the SoC-node fix until that source includes it. */
+	#io-channel-cells = <1>;
 	status = "okay";
 };
 
