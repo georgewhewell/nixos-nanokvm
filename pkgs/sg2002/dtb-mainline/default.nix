@@ -420,9 +420,9 @@ let
       test "$(fdtget -t s "$out" /soc/ethernet@4070000 status)" = okay
       test "$(fdtget -t s "$out" /soc/mmc@4310000 status)" = okay
       test "$(fdtget -t s "$out" /soc/i2c@4040000 status)" = okay
-      test "$(fdtget -t s "$out" /video-capture@a0c2000 compatible)" = \
+      test "$(fdtget -t s "$out" /soc/video-capture@a0c2000 compatible)" = \
         "sophgo,sg2002-csi-capture"
-      test "$(fdtget -t s "$out" /vpss@a080000 status)" = okay
+      test "$(fdtget -t s "$out" /soc/vpss@a080000 status)" = okay
     '';
 
   # NanoKVM-PCIe full-speed fallback; the carrier's high-speed link has

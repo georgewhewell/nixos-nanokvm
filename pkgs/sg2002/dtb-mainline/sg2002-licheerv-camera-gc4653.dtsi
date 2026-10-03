@@ -106,7 +106,10 @@
 		compatible = "sophgo,sg2002-ddr-top", "syscon";
 		reg = <0x0800a000 0x1000>;
 	};
+};
 
+/* All three DMA engines inherit /soc's dma-noncoherent property. */
+&{/soc} {
 	/* The generic SoC node is disabled, and the standalone DTB builder
 	 * consumes an unpatched kernel source. Keep the complete enabled node
 	 * here, sharing the deterministic media pool with CSI capture. */
@@ -205,13 +208,6 @@
 	};
 };
 
-&clk {
-	/* The beta-board middleware receiver profile selects CAM_MCLK1 while
-	 * retaining the GC4653 mode's 24 MHz reference-clock frequency. */
-	assigned-clocks = <&clk CLK_CAM1>;
-	assigned-clock-rates = <24000000>;
-};
-
 &i2c4 {
 	pinctrl-0 = <&i2c4_cam_cfg>;
 	pinctrl-names = "default";
@@ -224,6 +220,10 @@
 		pinctrl-names = "default";
 		clocks = <&clk CLK_CAM1>;
 		clock-names = "xvclk";
+		/* Keep the sensor's clock assignment on its consumer: the shared
+		 * CPUFreq overlay assigns MPLL on the clock-controller node. */
+		assigned-clocks = <&clk CLK_CAM1>;
+		assigned-clock-rates = <24000000>;
 		reset-gpios = <&porte 1 GPIO_ACTIVE_LOW>;
 
 		port {

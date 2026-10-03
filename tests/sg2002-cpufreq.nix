@@ -19,5 +19,6 @@ pkgs.runCommand "sg2002-cpufreq-tests" {
   nativeBuildInputs = [ pkgs.python3 pkgs.dtc pkgs.gnugrep ];
 } ''
   ${lib.concatMapStringsSep "\n" check configurations}
+  python3 ${./verify-cpufreq-dtb.py} ${pkgs.sg2002-dtb-mainline-cam}
   touch "$out"
 ''
