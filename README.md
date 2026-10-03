@@ -58,6 +58,11 @@ AIC8800 Wi-Fi support, audio, camera/ISP/codec drivers, C906L toolchain and
 firmware, and reusable board modules. The NanoKVM web application is packaged
 separately; it is not run by the minimal initrd.
 
+Mainline images expose the SG2002 hardware RNG through `/dev/hwrng`.
+Its output is mixed into Linux's random pool with zero entropy credit
+(`rng_core.default_quality=0`); hardware reads and fault recovery have been
+tested, but the source's entropy quality has not been characterized.
+
 ```sh
 nix develop .#c906l
 nix build .#checks.x86_64-linux.sg2002-c906l-rust-all-timers

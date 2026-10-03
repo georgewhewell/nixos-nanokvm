@@ -216,6 +216,9 @@ with lib.kernel; {
   SOPHGO_CV1800_RTCSYS = yes;
   RTC_DRV_CV1800 = yes;
 
+  HW_RANDOM = yes;
+  HW_RANDOM_SG2002 = yes;
+
   # On-die SoC temperature sensor (driver in patches/0006, backport
   # of Haylen Chu's stalled v5 LKML series). Built-in rather than =m
   # so it shows up in the USB-recovery initrd without an extra entry

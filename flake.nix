@@ -556,6 +556,7 @@
             "sg2002-wifi-ack-filter"
             "sg2002-clock-kunit"
             "sg2002-cpufreq"
+            "sg2002-rng"
             "sg2002-pmu"
             "sg2002-vpss-state"
             "sg2002-c906l-module-eval"
@@ -721,6 +722,10 @@
           sg2002-clock-kunit =
             pkgs.callPackage ./pkgs/sg2002/linux-mainline/tests/clock-kunit.nix { };
           sg2002-cpufreq = import ./tests/sg2002-cpufreq.nix {
+            inherit pkgs;
+            configurations = map checkedConfig catalog;
+          };
+          sg2002-rng = import ./tests/sg2002-rng.nix {
             inherit pkgs;
             configurations = map checkedConfig catalog;
           };

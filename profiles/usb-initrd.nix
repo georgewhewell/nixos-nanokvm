@@ -56,8 +56,9 @@ in {
     "console=${if config.sg2002.uart1Rescue.enable then "ttyS1" else "ttyS0"},115200"
     "earlycon=sbi" "panic=10" "oops=panic" "riscv.fwsz=0x80000"
     # This profile replaces kernelParams, so retain the platform's watchdog
-    # handoff policy explicitly as well as its recovery console.
+    # and RNG policies explicitly as well as its recovery console.
     "watchdog.stop_on_reboot=0"
+    "rng_core.default_quality=0"
     "systemd.getty_auto=no" "udev.children_max=2"
   ] ++ lib.optionals lcd [
     # Standard fbcon takeover; the built-in 4x6 font gives 60x40 characters.
