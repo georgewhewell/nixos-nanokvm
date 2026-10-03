@@ -10,6 +10,13 @@
 
 #include <dt-bindings/clock/sophgo,cv1800.h>
 
+&cpu0 {
+	/* Main C906 only; XTheadVector is incompatible with ratified RVV 1.0. */
+	riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicntr", "zicsr",
+			       "zifencei", "zihpm", "xtheadvector";
+	thead,vlenb = <16>;
+};
+
 / {
 	model = "Sipeed LicheeRV Nano B-W";
 	compatible = "sipeed,licheerv-nano-bw",

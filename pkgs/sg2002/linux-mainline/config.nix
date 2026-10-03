@@ -17,20 +17,14 @@ with lib.kernel; {
   KERNEL_GZIP = no;
   KERNEL_UNCOMPRESSED = yes;
 
-  # THE early-hang cause. The NixOS base enables the RISC-V vector stack
-  # including RISCV_ISA_XTHEADVECTOR (mainline support for the C906's
-  # *non-standard* T-Head vector, detected via the T-Head vendor id — not
-  # the DT `riscv,isa` string, which is only "rv64imafdc"). Worse,
-  # RISCV_PROBE_VECTOR_UNALIGNED_ACCESS makes the kernel *execute vector
-  # instructions at boot* to probe unaligned-access support — before any
-  # console. On the SG2002's C906 that probe hangs silently. The riscv
-  # defconfig (which booted) has no vector support at all. Rip the whole
-  # vector stack out to match it.
-  RISCV_ISA_V = no;
-  RISCV_ISA_V_DEFAULT_ENABLE = no;
-  RISCV_ISA_XTHEADVECTOR = no;
-  RISCV_VECTOR_MISALIGNED = no;
-  RISCV_PROBE_VECTOR_UNALIGNED_ACCESS = no;
+  # SG2002's main C906 has 128-bit XTheadVector (based on vector 0.7.1),
+  # not the ratified V ISA. Keep upstream context switching available, with
+  # Ghostwrite mitigation enabled: Linux disables XTheadVector by default
+  # for this CPU ID. See docs/sg2002-vector.md for the hardware investigation.
+  RISCV_ISA_V = yes;
+  RISCV_ISA_V_DEFAULT_ENABLE = yes;
+  RISCV_ISA_XTHEADVECTOR = yes;
+  ERRATA_THEAD_GHOSTWRITE = yes;
 
   # More NixOS-base-only options that *do work during early boot* and that
   # the booting defconfig lacks. Vector/KASLR/RELOCATABLE off didn't fix

@@ -557,6 +557,7 @@
             "sg2002-clock-kunit"
             "sg2002-cpufreq"
             "sg2002-pmu"
+            "sg2002-vector"
             "sg2002-vpss-state"
             "sg2002-c906l-module-eval"
             "sg2002-c906l-picoclaw-module-eval"
@@ -725,6 +726,10 @@
             configurations = map checkedConfig catalog;
           };
           sg2002-pmu = import ./tests/sg2002-pmu.nix { inherit pkgs; };
+          sg2002-vector = import ./tests/sg2002-vector.nix {
+            inherit pkgs;
+            configurations = map checkedConfig catalog;
+          };
           sg2002-c906l-module-eval = import ./tests/sg2002-c906l-eval.nix {
             inherit
               pkgs

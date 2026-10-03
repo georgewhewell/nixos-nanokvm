@@ -42,6 +42,10 @@ let
 
   patches = [
     (patch {
+      name = "riscv-preserve-xtheadvector-state-across-fpu-switches";
+      patch = ./patches/0082-riscv-preserve-xtheadvector-state-across-fpu-switches.patch;
+    })
+    (patch {
       name = "clk-cv18xx-check-pll-lock-status";
       patch = ./patches/0074-clk-cv18xx-check-pll-lock-status.patch;
     })
@@ -344,6 +348,12 @@ let
   ];
 
   meta = {
+    "riscv-preserve-xtheadvector-state-across-fpu-switches" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "Linux saves XTheadVector CSRs before restoring an aliased FCSR and checks the T-Head VS bits";
+      notes = "SG2002 C906 aliases VXRM/VXSAT into FCSR[10:8]; tested with concurrent vector tasks and asynchronous signals.";
+    };
     "clk-cv18xx-check-pll-lock-status" = {
       origin = "local";
       upstreamStatus = "draft";

@@ -20,15 +20,5 @@ pkgs.runCommand "sg2002-pmu-tests"
   # The C906 signals counter overflow through T-Head CSRs, not Sscofpmf.
   grep -qx CONFIG_ERRATA_THEAD_PMU=y ${kernel}
 
-  # This core has no vector unit: an OP-V instruction traps with SIGILL on
-  # real silicon, unlike the Allwinner D1's C906. Do not let a DT or config
-  # change start advertising one.
-  grep -qx 'CONFIG_RISCV_ISA_V is not set' ${kernel} \
-    || grep -qx '# CONFIG_RISCV_ISA_V is not set' ${kernel}
-  if dtc -I dtb -O dts ${uboot}/u-boot.dtb 2>/dev/null | grep -q xtheadvector; then
-    echo "SG2002's C906 has no vector unit; do not advertise xtheadvector" >&2
-    exit 1
-  fi
-
   touch "$out"
 ''
