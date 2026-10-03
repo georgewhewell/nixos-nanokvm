@@ -238,8 +238,11 @@ in {
       # reboot notifier. dw_wdt otherwise stops the counter before kexec,
       # leaving a failed handoff without a hardware reset. Use the standard
       # watchdog-core policy rather than a driver or register workaround.
-      boot.kernelParams = lib.optional (cfg.kernel == "mainline")
-        "watchdog.stop_on_reboot=0";
+      boot.kernelParams = lib.optionals (cfg.kernel == "mainline") [
+        "watchdog.stop_on_reboot=0"
+        # Mix hardware RNG output without claiming unmeasured entropy.
+        "rng_core.default_quality=0"
+      ];
       systemd.package = lib.mkDefault systemdWithOldRootCleanup;
       system.build.fip = fipPkg;
 

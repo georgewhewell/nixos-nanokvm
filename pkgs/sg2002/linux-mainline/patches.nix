@@ -42,6 +42,10 @@ let
 
   patches = [
     (patch {
+      name = "hwrng-sg2002";
+      patch = ./patches/0084-hwrng-add-sg2002-support.patch;
+    })
+    (patch {
       name = "clk-cv18xx-check-pll-lock-status";
       patch = ./patches/0074-clk-cv18xx-check-pll-lock-status.patch;
     })
@@ -340,6 +344,12 @@ let
   ];
 
   meta = {
+    "hwrng-sg2002" = {
+      origin = "local adaptation of Barebox starfive-vic-rng and Synopsys embARC OSP";
+      upstreamStatus = "draft";
+      dropWhen = "upstream Linux supports the SG2002 DesignWare NIST RNG";
+      notes = "Uses fresh noise seeds, bounded polling and hardware alarm checks. Entropy credit is disabled by board policy pending characterization.";
+    };
     "clk-cv18xx-check-pll-lock-status" = {
       origin = "local";
       upstreamStatus = "draft";
