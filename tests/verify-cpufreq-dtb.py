@@ -56,7 +56,8 @@ assert get(scaling, trip, "temperature") == "85000"
 assert get(scaling, trip, "hysteresis") == "5000"
 assert get(scaling, trip, "type", "s") == "passive"
 # Packaged DRAM is limited to 115 C. Check the final carrier DT, including
-# overlays, leaves 10 C nominal margin for shutdown after passive cooling.
+# overlays, leaves 10 C nominal margin for reboot after passive cooling.
+assert get(scaling, zone, "critical-action", "s") == "reboot"
 critical = zone + "/trips/soc-crit"
 assert get(scaling, critical, "type", "s") == "critical"
 critical_temp = int(get(scaling, critical, "temperature"))

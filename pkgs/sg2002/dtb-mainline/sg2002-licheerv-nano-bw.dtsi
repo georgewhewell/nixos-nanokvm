@@ -409,8 +409,8 @@
 	 * referencing the sensor; without this it returns -ENODEV.
 	 * SG2002 Preliminary Datasheet v1.0-alpha, section 2.5.2 note 3
 	 * (p. 27) and section 2.5.5 (p. 32), limits packaged DRAM to
-	 * 115 °C. Request shutdown at 105 °C to leave nominal margin
-	 * for detection and shutdown; 125 °C is destructive. The
+	 * 115 °C. Request reboot at 105 °C to leave nominal margin;
+	 * this firmware has no working power-off handler. The
 	 * 1 s polling delay is borrowed from vendor; the cv1800
 	 * driver also fires the zone via threshold IRQ when trips
 	 * are crossed, so polling is just a fallback. */
@@ -419,6 +419,7 @@
 			polling-delay = <1000>;
 			polling-delay-passive = <1000>;
 			thermal-sensors = <&soc_temp>;
+			critical-action = "reboot";
 
 			trips {
 				soc_crit: soc-crit {
