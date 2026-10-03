@@ -42,6 +42,10 @@ let
 
   patches = [
     (patch {
+      name = "nvmem-add-sg2002-read-only-public-efuse";
+      patch = ./patches/0083-nvmem-add-SG2002-read-only-public-efuse.patch;
+    })
+    (patch {
       name = "clk-cv18xx-check-pll-lock-status";
       patch = ./patches/0074-clk-cv18xx-check-pll-lock-status.patch;
     })
@@ -340,6 +344,12 @@ let
   ];
 
   meta = {
+    "nvmem-add-sg2002-read-only-public-efuse" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "SG2002 public eFuse shadow support is available upstream";
+      notes = "Read-only NVMEM access to public user words and device ID; protected and undocumented ranges are never read.";
+    };
     "clk-cv18xx-check-pll-lock-status" = {
       origin = "local";
       upstreamStatus = "draft";

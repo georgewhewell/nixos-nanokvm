@@ -224,6 +224,10 @@ with lib.kernel; {
   THERMAL = yes;
   THERMAL_OF = yes;
 
+  # Public eFuse shadow words only; the provider has no programming path.
+  NVMEM = yes;
+  NVMEM_SG2002_EFUSE = yes;
+
   # SAR-ADC (auxiliary 12-bit ADC at 0x030F0000, distinct from the
   # audio RXADC). Three channels; PIN_ADC1 is the only one broken
   # out as a dedicated analog pad on the SG2002. Driver: drivers/iio/
