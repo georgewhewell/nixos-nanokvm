@@ -47,6 +47,14 @@ assert int(assigned_id) == 0  # CLK_MPLL in the pinned clock binding
 pll_rate = int(get(scaling, clk, "assigned-clock-rates"))
 assert pll_rate == 1000000000
 assert max(rates) == pll_rate, "top OPP must be the PLL itself, divided by one"
+
+# Both assignments must survive composing the camera and CPUFreq overlays.
+# Putting both on the clock controller silently replaced the sensor's rate.
+sensor = "/soc/i2c@4040000/camera-sensor@29"
+if sensor in after:
+    assert get(scaling, sensor, "assigned-clocks") == get(scaling, sensor, "clocks")
+    assert get(scaling, sensor, "assigned-clock-rates") == "24000000"
+
 for rate in rates:
     assert pll_rate % rate == 0, f"{rate} is not an integer division of the PLL"
     assert pll_rate // rate <= 15, "CPU divider field is four bits, one-based"
