@@ -103,6 +103,29 @@ runs (36,000 checks), including concurrent usercopy and kernel-copy tests,
 without kernel warnings. The normal mitigated boot passed
 `--expect-disabled`, all 4,864 usercopy cases and the kernel-copy module.
 
+## NanoKVM-PCIe deployment
+
+On 2026-10-04, the same patch series was deployed as a full NixOS SD
+generation on a NanoKVM-PCIe, with `sg2002.mitigations = false`. Linux
+7.2.8 booted and passed the existing extlinux try-boot health check.
+Ethernet SSH remained available, and the HDMI bridge and MediaMTX ran
+without service restarts or failed units.
+
+With HDMI capture and H.264 encoding active, the board passed another
+4,000 vector register/control checks, all 4,864 usercopy cases and fault
+tests, and the kernel-copy module's data, return-value, canary, guard-page,
+atomic and nested-context checks. The module checks both the private
+candidate and the running kernel's `memcpy`. The kernel journal contained
+no copy-test failures, kernel warnings or oopses.
+
+Thirty-second RTSP samples at 960×540 decoded without errors before the
+upgrade, during the tests and afterwards. Frame counts divided by sample
+duration were 55.2, 56.3 and 59.0 fps respectively. These are continuity
+checks under different loads, not evidence of a vector-induced video
+speedup. The HDMI pipeline uses hardware scaling and encoding; this
+deployment establishes compatibility, not an isolated application benefit
+from kernel `memcpy`.
+
 ## Compiler use
 
 The system keeps its scalar `rv64gc` compilation baseline and C906 tuning.
