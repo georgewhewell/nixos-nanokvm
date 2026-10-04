@@ -54,8 +54,10 @@ The option defaults to `true`. Setting it to `false` adds `mitigations=off`
 to both SD and USB RAM boot command lines. This disables all CPU mitigations
 controlled by that argument, not just Ghostwrite. With it, `riscv_hwprobe`
 reports XTheadVector and the guarded kernel copy paths become available;
-the standard V hardware capability remains clear. The diagnostic RAM boots
-used this same boot argument. Ordinary scalar binaries retain their ISA.
+the standard V hardware capability remains clear. An image built with this
+option was booted without a command-line override: its generated command line
+contained `mitigations=off`, and the vector, usercopy and kernel-copy checks
+passed. Ordinary scalar binaries retain their ISA.
 
 Three C906 details require a local context-handling fix:
 
@@ -111,6 +113,9 @@ Existing binaries do not acquire vector instructions when kernel support
 is enabled, and ordinary RVV 1.0 routines cannot substitute for this ISA.
 Do not globally change `nixpkgs.hostPlatform.gcc.arch` while shipped boots
 keep vector access disabled.
+
+See the [OpenSSH, OpenSSL and WPA compiler experiment](sg2002-vector-apps.md)
+for package-local builds and application measurements.
 
 References: [XuanTie ISA specification](https://github.com/XUANTIE-RV/thead-extension-spec/blob/master/xtheadvector.adoc),
 [Linux vector context handling](https://github.com/torvalds/linux/blob/master/arch/riscv/include/asm/vector.h),

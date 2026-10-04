@@ -42,6 +42,11 @@ RAM boot (2026-10-04). Times include dispatch and vector context overhead.
 The first three cases use scalar copies; the final three use vectors.
 The 4 KiB misaligned cases improve by about 14.7× hot and 5.3× streaming.
 These are focused copy measurements, not application throughput claims.
+The [SSH comparison](sg2002-vector-apps.md#kernel-vector-paths-enabled-versus-disabled)
+found essentially unchanged AES-GCM and ChaCha20 download results, and about
+3% faster ChaCha20 uploads with both vector copy paths enabled. It changes
+usercopy and kernel memcpy together and does not isolate this patch;
+an application benefit from custom kernel memcpy alone remains unproven.
 
 The first long-copy test exposed a trap-entry bug: the standard status
 mask left half of T-Head VS enabled, triggering scheduler warnings during
