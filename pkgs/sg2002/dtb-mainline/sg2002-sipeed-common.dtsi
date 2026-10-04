@@ -1,0 +1,75 @@
+/* Shared bring-up settings for the supported Sipeed carriers.
+ * USB gadget policy and IIC0 pad routing are board choices, not SoC
+ * capabilities. Both board compositions include this file explicitly. */
+
+/ {
+	chosen {
+		bootargs = "console=ttyGS0,115200 console=ttyS0,115200 earlycon=sbi root=/dev/disk/by-label/NIXOS_SD rootwait";
+	};
+};
+
+&usb {
+	dr_mode = "peripheral";
+
+	/* Turn the dwc2 internal DMA on. Kernel patch 0001 removed
+	 * upstream's hard-coded g_dma=false for cv1800, which left the
+	 * gadget in slave/PIO mode -- where the data path wedges after a
+	 * handful of packets (host sees `cdc_* transmit queue 0 timed
+	 * out`, link dead from the first ARP). With DMA on, dwc2 also
+	 * autodetects descriptor DMA from GHWCFG4 (this core reports
+	 * dma_desc_enable=1, DWC_otg 4.20a) and runs g_dma_desc=1: the
+	 * same mode the vendor 5.10 kernel forces in its cv182x params.
+	 * Verified from debugfs hw_params/params on the Nano W. */
+	g-use-dma;
+
+	/* High-speed. Measured on a LicheeRV Nano W on 2026-09-19: full-speed tops out at
+	 * ~7.7 Mbit/s each way; high-speed carries ~220 Mbit/s into the
+	 * board and ~190 Mbit/s out with CDC-ECM. The old full-speed cap
+	 * dated from PicoClaw-carrier link errors (-71 EPROTO), which did
+	 * not recur with this layout. The Nano W has not been soaked for
+	 * longer than about ten minutes per boot at high-speed. */
+	maximum-speed = "high-speed";
+
+	/* Dedicated-FIFO layout for a network+ACM gadget. The core has
+	 * 3072 words of FIFO RAM (GHWCFG3, `total_fifo_size` in debugfs),
+	 * so upstream's 1536-word RX FIFO plus 128-word per-endpoint TX
+	 * FIFOs (a copy of U-Boot's fastboot layout) uses only 2144 and
+	 * gives the bulk-IN endpoint a single 512-byte packet of buffer,
+	 * which bounds board-to-host throughput: 154 Mbit/s with those
+	 * values, 184-188 Mbit/s with the layout below (ECM, same kernel).
+	 *
+	 * RX: 1024 words = 8 high-speed bulk packets. dwc2 assigns each
+	 * IN endpoint the smallest listed TX FIFO that fits its maxpacket,
+	 * so two 512-word and two 480-word FIFOs serve the network bulk IN
+	 * and ACM bulk IN (~4 packets each), and two 16-word FIFOs serve
+	 * the two interrupt-IN notification endpoints. Sum: exactly 3072. */
+	g-rx-fifo-size = <1024>;
+	g-np-tx-fifo-size = <32>;
+	g-tx-fifo-size = <512 512 480 480 16 16>;
+};
+
+&pinctrl {
+	/* I2C0 on the dedicated IIC0 pair — pull-ups are required by
+	 * the I2C protocol and the on-die pad pulls (~50 kΩ) are weak;
+	 * external 4.7-10 kΩ resistors on the user's wiring are still
+	 * the right answer if they're driving long traces. */
+	i2c0_cfg: i2c0-cfg {
+		i2c0-pins {
+			pinmux = <PINMUX(PIN_IIC0_SCL, 0)>,
+				 <PINMUX(PIN_IIC0_SDA, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+
+};
+
+/* I2C0 on the dedicated IIC0 pair. Carrier overlays may enable other
+ * I2C controllers on their selected alternate pads. */
+&i2c0 {
+	pinctrl-0 = <&i2c0_cfg>;
+	pinctrl-names = "default";
+	clock-frequency = <100000>;
+	status = "okay";
+};

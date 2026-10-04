@@ -68,8 +68,12 @@ nix build .#nanokvm-server
 The `licheerv.mainline.initrd.c906l-all-timers` target provides the opt-in
 Timer4–7 firmware. Camera/ISP blocks remain Linux-owned, not C906L firmware.
 See [C906L architecture and hardware evidence](docs/sg2002-c906l.md) and
-[mainline ISP support](docs/sg2002-mainline-isp.md). Commands in historical
-network-root bring-up reports describe an older development workflow.
+[mainline ISP support](docs/sg2002-mainline-isp.md).
+Commands in historical network-root bring-up reports describe an older
+development workflow.
+
+The main C906 also has [128-bit XTheadVector support](docs/sg2002-vector.md),
+with the upstream Ghostwrite mitigation retained by default.
 
 The separate `qemu-c906-virt` app runs a full development VM with the shared
 kernel and a 256 MiB C906 model. QEMU has no SG2002 peripheral model: it cannot

@@ -95,6 +95,18 @@ in {
       '';
     };
 
+    mitigations = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Whether to retain the kernel's default CPU vulnerability mitigations.
+        Setting this to false adds `mitigations=off` to the kernel command line.
+        On mainline this permits XTheadVector and its guarded copy paths.
+        It disables all CPU mitigations controlled by that argument, not only
+        Ghostwrite.
+      '';
+    };
+
     uboot = mkOption {
       type = types.enum ["mainline" "vendor"];
       default = "mainline";
@@ -239,7 +251,8 @@ in {
       # leaving a failed handoff without a hardware reset. Use the standard
       # watchdog-core policy rather than a driver or register workaround.
       boot.kernelParams = lib.optional (cfg.kernel == "mainline")
-        "watchdog.stop_on_reboot=0";
+        "watchdog.stop_on_reboot=0"
+        ++ lib.optional (!cfg.mitigations) "mitigations=off";
       systemd.package = lib.mkDefault systemdWithOldRootCleanup;
       system.build.fip = fipPkg;
 

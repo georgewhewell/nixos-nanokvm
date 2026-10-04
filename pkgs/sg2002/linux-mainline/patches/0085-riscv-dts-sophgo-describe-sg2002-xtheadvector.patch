@@ -1,0 +1,27 @@
+From: NanoKVM contributors
+Subject: [PATCH] riscv: dts: sophgo: describe SG2002 XTheadVector
+
+The main C906 on SG2002 implements XTheadVector with 128-bit registers.
+Describe this in the SoC DTS rather than a carrier overlay. Do not add
+the ratified V extension or change the shared CV180x CPU description.
+
+Verified on LicheeRV Nano: VLENB=16, vector byte load/add/store results,
+and userspace context switching with the kernel vector support enabled.
+
+diff --git a/arch/riscv/boot/dts/sophgo/sg2002.dtsi b/arch/riscv/boot/dts/sophgo/sg2002.dtsi
+--- a/arch/riscv/boot/dts/sophgo/sg2002.dtsi
++++ b/arch/riscv/boot/dts/sophgo/sg2002.dtsi
+@@ -55,6 +55,13 @@
+ 	};
+ };
+ 
++&cpu0 {
++	/* The main C906 implements draft 0.7.1, not ratified RVV 1.0. */
++	riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicntr", "zicsr",
++			       "zifencei", "zihpm", "xtheadvector";
++	thead,vlenb = <16>;
++};
++
+ &sdhci0 {
+ 	compatible = "sophgo,sg2002-dwcmshc";
+ };

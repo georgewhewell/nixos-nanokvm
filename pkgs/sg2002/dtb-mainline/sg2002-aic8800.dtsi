@@ -1,0 +1,125 @@
+/* AIC8800DC SDIO wiring shared by the Nano B-W and NanoKVM-PCIe.
+ * Include explicitly on boards with this module; nowifi variants disable
+ * the controller after including its wiring description. */
+
+#include <dt-bindings/clock/sophgo,cv1800.h>
+
+&pinctrl {
+	/* Vendor U-Boot muxes the onboard WiFi enable line through
+	 * EMMC_DAT2 as GPIOA26 and the SD1_* pads into SDIO mode before
+	 * Linux starts. Mainline leaves these pads unclaimed, so teach
+	 * pinctrl the same board wiring. */
+	wifi_pwr_cfg: wifi-pwr-cfg {
+		wifi-pwr-pins {
+			pinmux = <PINMUX(PIN_EMMC_DAT2, 3)>;
+			bias-pull-down;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+
+	sdhci1_cfg: sdhci1-cfg {
+		sdhci1-clk-pins {
+			pinmux = <PINMUX(PIN_SD1_CLK, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <16100>;
+			power-source = <3300>;
+		};
+
+		sdhci1-cmd-pins {
+			pinmux = <PINMUX(PIN_SD1_CMD, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+
+		sdhci1-data-pins {
+			pinmux = <PINMUX(PIN_SD1_D0, 0)>,
+				 <PINMUX(PIN_SD1_D1, 0)>,
+				 <PINMUX(PIN_SD1_D2, 0)>,
+				 <PINMUX(PIN_SD1_D3, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+};
+
+/* SDIO controller wired to the onboard AIC8800DC WiFi+BT chip.
+ * Upstream DT leaves sdhci1 disabled. Properties cribbed from
+ * sg2002-milkv-duo-s / cv1812h-huashan-pi (same SoC family, same
+ * AIC8800DC SDIO layout):
+ *   - cap-sdio-irq      — SDIO in-band interrupts; without this CMD5
+ *                         gets no response and mmc1 bails with
+ *                         "Failed to initialize a non-removable card"
+ *   - non-removable + no-mmc + no-sd — SDIO only
+ *   - disable-wp        — no write-protect pin
+ *   - max-frequency 75 MHz — the host divides a 300 MHz source by 2N,
+ *     so the steps above huashan-pi's 50 MHz are 75 and 150; tuning
+ *     fails at 150 MHz
+ *   - resets = <&rst 17>   — deassert SDIO1 soft reset. Mainline
+ *     U-Boot leaves this asserted; the cv18xx ops path in
+ *     sdhci-of-dwcmshc never consumed a reset, so the IP stayed dead
+ *     (caps read back but mmc_rescan never powers the host up). The
+ *     paired kernel patch sdhci-of-dwcmshc-cv18xx-reset adds an init
+ *     callback that reads this property. Reset ID 17 = RST_SD1 per
+ *     the Sophgo vendor cv181x-resets.h (0x03003000 bit 17: 1=running). */
+&sdhci1 {
+	status = "okay";
+	/* The internal reference must remain held even when probe is deferred
+	 * until after clk_disable_unused (e.g. a remote vmmc provider). */
+	clocks = <&clk CLK_AXI4_SD1>, <&clk CLK_SD1>, <&clk CLK_SD1_100K>;
+	clock-names = "core", "bus", "timer";
+	bus-width = <4>;
+	pinctrl-0 = <&sdhci1_cfg &wifi_pwr_cfg>;
+	pinctrl-names = "default";
+	cap-sdio-irq;
+	disable-wp;
+	non-removable;
+	no-mmc;
+	no-sd;
+	max-frequency = <75000000>;
+	resets = <&rst 17>;
+
+	/* CLKGEN fixup — see sdhci-of-dwcmshc-cv18xx-reset.patch.
+	 * Mainline U-Boot leaves mmc1 on the XTAL bypass path so
+	 * SDHCI_CLOCK_INT_STABLE never latches. Write the PLL divider
+	 * (0x40009 matches vendor MMC_MAX_CLOCK_DIV_VALUE for 375 MHz)
+	 * to 0x0300207C and clear bit 7 of the CLKGEN bypass-select
+	 * register at 0x03002030 to route mmc1 off XTAL.
+	 *
+	 * Per the mainline sophgo,cv1800b-clk driver, clk_sd1 has its
+	 * mux AND divider packed into 0x0300207C:
+	 *   bits [9:8]   = mux select (0=osc 1=fpll 2=disppll)
+	 *   bits [20:16] = 5-bit divider
+	 *   bit  0       = enable
+	 * Vendor writes 0x40009 (mux=0 osc, div=4) but that only works
+	 * on vendor SW because their CCF is on an OSC-tied path. On
+	 * mainline we need to pick fpll:
+	 *   0x40109 = mux=1 fpll(1500MHz), div=4 -> 375MHz. */
+	sophgo,sdio-clkgen-pll-reg = <0x0300207C>;
+	sophgo,sdio-clkgen-pll-div = <0x00040109>;
+	sophgo,sdio-clkgen-bypass-reg = <0x03002030>;
+	sophgo,sdio-clkgen-bypass-bit = <7>;
+	sophgo,mshc-ctrl-8-9;
+	sophgo,mshc-ctrl-16;
+
+	/* AIC8800 power-enable is GPIOA26, wired out on the EMMC_DAT2
+	 * pad. wifi_pwr_cfg above describes the board wiring, but on
+	 * clean boot the raw pad register still comes up as function 1
+	 * (JTAG), so the driver also flips the register to GPIO
+	 * function 3 before toggling power. */
+	sophgo,wifi-power-pinmux-reg = <0x0300104C>;
+	wifi-power-gpios = <&porta 26 0>;
+
+	/* Last two vendor u-boot inits we hadn't replicated:
+	 *   - rtc2ap AHB bridge at 0x03000248 (write 0x1 on every SDIO1
+	 *     bind — opens the RTC-domain → AP bridge)
+	 *   - SDIO pad drive-strength bank at 0x05027058 (always-on
+	 *     island, DAT/CMD = 1<<2, CLK = 2<<2)
+	 * These are the remaining things the vendor u-boot does before
+	 * Linux that we haven't; needed past cmd 1037 DBG_START_APP_REQ
+	 * timeout. */
+	sophgo,rtc2ap-bridge-reg = <0x03000248>;
+	sophgo,sdio-pad-cfg-base = <0x05027058>;
+};

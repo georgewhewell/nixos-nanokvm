@@ -42,6 +42,22 @@ let
 
   patches = [
     (patch {
+      name = "riscv-preserve-xtheadvector-state-across-fpu-switches";
+      patch = ./patches/0082-riscv-preserve-xtheadvector-state-across-fpu-switches.patch;
+    })
+    (patch {
+      name = "riscv-use-xtheadvector-for-large-user-copies";
+      patch = ./patches/0083-riscv-use-xtheadvector-for-large-user-copies.patch;
+    })
+    (patch {
+      name = "riscv-use-xtheadvector-for-large-kernel-copies";
+      patch = ./patches/0084-riscv-use-xtheadvector-for-large-kernel-copies.patch;
+    })
+    (patch {
+      name = "riscv-dts-sophgo-describe-sg2002-xtheadvector";
+      patch = ./patches/0085-riscv-dts-sophgo-describe-sg2002-xtheadvector.patch;
+    })
+    (patch {
       name = "clk-cv18xx-check-pll-lock-status";
       patch = ./patches/0074-clk-cv18xx-check-pll-lock-status.patch;
     })
@@ -344,6 +360,30 @@ let
   ];
 
   meta = {
+    "riscv-use-xtheadvector-for-large-user-copies" = {
+      origin = "local";
+      upstreamStatus = "local-only";
+      dropWhen = "Linux supports XTheadVector user copies with equivalent context and fault handling";
+      notes = "C906 byte-vector copies for differing word alignments, at least 1024 bytes and the tunable threshold; preserves scalar fault fallback and mitigation policy.";
+    };
+    "riscv-use-xtheadvector-for-large-kernel-copies" = {
+      origin = "local";
+      upstreamStatus = "local-only";
+      dropWhen = "Linux supplies a measured C906 memcpy with equivalent context and mitigation guards";
+      notes = "Vector memcpy for differing word alignments and at least 1024 bytes in ordinary task context; early boot, atomic/nested contexts, purgatory and __pi aliases remain scalar.";
+    };
+    "riscv-dts-sophgo-describe-sg2002-xtheadvector" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "upstream sg2002.dtsi describes xtheadvector and its 16-byte VLENB";
+      notes = "Main C906 hardware capability, shared by all SG2002 carriers; also applied by the standalone DTB builder.";
+    };
+    "riscv-preserve-xtheadvector-state-across-fpu-switches" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "Linux saves XTheadVector CSRs before restoring an aliased FCSR and checks the T-Head VS bits";
+      notes = "SG2002 C906 aliases VXRM/VXSAT into FCSR[10:8]; tested with concurrent vector tasks and asynchronous signals.";
+    };
     "clk-cv18xx-check-pll-lock-status" = {
       origin = "local";
       upstreamStatus = "draft";

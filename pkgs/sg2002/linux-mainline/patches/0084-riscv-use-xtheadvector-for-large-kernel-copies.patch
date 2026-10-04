@@ -1,0 +1,165 @@
+From: NanoKVM contributors
+Subject: [PATCH] riscv: use XTheadVector for large misaligned kernel copies
+
+Use a byte-vector loop for large copies with different offsets within an
+eight-byte word in ordinary task context. C906 measurements favour the
+unmodified scalar loop when source and destination alignments match.
+Keep interrupt, atomic, nested-vector and early-boot copies scalar. Protect
+vector entry and exit from recursively entering memcpy while retaining
+preemption during the actual copy when kernel vector contexts support it.
+
+The alternative obeys the existing extension/mitigation policy. Preserve
+the position-independent memcpy aliases as direct scalar entry points.
+Ordinary C compilation remains scalar. The conservative 1024-byte
+threshold amortizes entry overhead for the slower scalar misaligned path.
+
+Depends on the assembler-visible vendor extension keys in patch 0082.
+
+diff --git a/arch/riscv/lib/Makefile b/arch/riscv/lib/Makefile
+index f668b98..7bab74c 100644
+--- a/arch/riscv/lib/Makefile
++++ b/arch/riscv/lib/Makefile
+@@ -1,6 +1,11 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ lib-y			+= delay.o
+ lib-y			+= memcpy.o
++lib-$(CONFIG_RISCV_ISA_XTHEADVECTOR) += memcpy_vector.o
++# A memory primitive must not recurse through instrumentation hooks.
++KASAN_SANITIZE_memcpy_vector.o := n
++KCSAN_SANITIZE_memcpy_vector.o := n
++KCOV_INSTRUMENT_memcpy_vector.o := n
+ lib-y			+= memset.o
+ lib-y			+= memmove.o
+ ifeq ($(CONFIG_KASAN_GENERIC)$(CONFIG_KASAN_SW_TAGS),)
+diff --git a/arch/riscv/lib/memcpy.S b/arch/riscv/lib/memcpy.S
+index 44e009e..e2bf20c 100644
+--- a/arch/riscv/lib/memcpy.S
++++ b/arch/riscv/lib/memcpy.S
+@@ -5,9 +5,34 @@
+ 
+ #include <linux/linkage.h>
+ #include <asm/asm.h>
++#include <asm/alternative-macros.h>
++#include <asm/vendorid_list.h>
++#include <asm/vendor_extensions/thead.h>
++
++#define XTHEADVECTOR_ALT (RISCV_VENDOR_EXT_ALTERNATIVES_BASE + RISCV_ISA_VENDOR_EXT_XTHEADVECTOR)
++
++#if defined(CONFIG_RISCV_ISA_XTHEADVECTOR) && defined(CONFIG_64BIT) && !defined(__NO_VECTOR_MEMCPY)
++#define USE_XTHEADVECTOR_MEMCPY
++#endif
+ 
+ /* void *memcpy(void *, const void *, size_t) */
++#ifdef USE_XTHEADVECTOR_MEMCPY
+ SYM_FUNC_START(__memcpy)
++	/* The unpatched path also covers early boot and Ghostwrite mitigation. */
++	ALTERNATIVE("j .Lmemcpy_scalar", "nop", THEAD_VENDOR_ID, \
++		XTHEADVECTOR_ALT, CONFIG_RISCV_ISA_XTHEADVECTOR)
++	li t0, 1024
++	bltu a2, t0, __memcpy_scalar
++	/* C906's scalar unrolled loop wins when the buffers are co-aligned. */
++	xor t0, a0, a1
++	andi t0, t0, SZREG-1
++	beqz t0, __memcpy_scalar
++	tail __memcpy_vector
++SYM_FUNC_END(__memcpy)
++#endif
++
++SYM_FUNC_START(__memcpy_scalar)
++.Lmemcpy_scalar:
+ 	move t6, a0  /* Preserve return value */
+ 
+ 	/* Defer to byte-oriented copy for small sizes */
+@@ -104,7 +129,29 @@ SYM_FUNC_START(__memcpy)
+ 	bltu a1, a3, 5b
+ 6:
+ 	ret
+-SYM_FUNC_END(__memcpy)
++SYM_FUNC_END(__memcpy_scalar)
++#ifndef USE_XTHEADVECTOR_MEMCPY
++SYM_FUNC_ALIAS(__memcpy, __memcpy_scalar)
++#endif
+ SYM_FUNC_ALIAS_WEAK(memcpy, __memcpy)
+-SYM_FUNC_ALIAS(__pi_memcpy, __memcpy)
+-SYM_FUNC_ALIAS(__pi___memcpy, __memcpy)
++SYM_FUNC_ALIAS(__pi_memcpy, __memcpy_scalar)
++SYM_FUNC_ALIAS(__pi___memcpy, __memcpy_scalar)
++
++#ifdef USE_XTHEADVECTOR_MEMCPY
++/* Called only with kernel vector ownership. Byte elements allow any alignment. */
++SYM_FUNC_START(__memcpy_thead)
++	.option push
++	.option arch, rv64gc_xtheadvector
++	mv t0, a0
++1:
++	th.vsetvli t1, a2, e8, m8
++	th.vlb.v v0, (a1)
++	th.vsb.v v0, (t0)
++	add a1, a1, t1
++	add t0, t0, t1
++	sub a2, a2, t1
++	bnez a2, 1b
++	ret
++	.option pop
++SYM_FUNC_END(__memcpy_thead)
++#endif
+diff --git a/arch/riscv/lib/memcpy_vector.c b/arch/riscv/lib/memcpy_vector.c
+new file mode 100644
+index 0000000..9154c15
+--- /dev/null
++++ b/arch/riscv/lib/memcpy_vector.c
+@@ -0,0 +1,40 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#define DISABLE_BRANCH_PROFILING
++#include <linux/preempt.h>
++#include <linux/sched.h>
++#include <asm/simd.h>
++#include <asm/vector.h>
++
++asmlinkage void *__memcpy_scalar(void *dst, const void *src, size_t n);
++asmlinkage void *__memcpy_thead(void *dst, const void *src, size_t n);
++asmlinkage void *__memcpy_vector(void *dst, const void *src, size_t n);
++
++/* Entered through the XTheadVector alternative in memcpy.S for large copies. */
++asmlinkage void *notrace __memcpy_vector(void *dst, const void *src, size_t n)
++{
++	/*
++	 * memcpy is also used before task setup, in interrupts, under locks and
++	 * by vector context management itself. Keep all of those uses scalar.
++	 * preemptible() is false without PREEMPT_COUNT; do not depend on a
++	 * recursion guard that would compile away in that configuration.
++	 */
++	if (system_state != SYSTEM_RUNNING || !preemptible() ||
++	    !may_use_simd() ||
++	    (riscv_v_flags() & (RISCV_KERNEL_MODE_V | RISCV_PREEMPT_V)))
++		return __memcpy_scalar(dst, src, n);
++
++	/*
++	 * Block recursive entry before begin sets its vector ownership flags,
++	 * and until end finishes clearing them. The data copy can still be
++	 * preempted when the kernel's vector context supports that.
++	 */
++	preempt_disable_notrace();
++	kernel_vector_begin();
++	preempt_enable_notrace();
++	__memcpy_thead(dst, src, n);
++	preempt_disable_notrace();
++	kernel_vector_end();
++	preempt_enable_notrace();
++
++	return dst;
++}
+diff --git a/arch/riscv/purgatory/Makefile b/arch/riscv/purgatory/Makefile
+index b0358a7..b7eab55 100644
+--- a/arch/riscv/purgatory/Makefile
++++ b/arch/riscv/purgatory/Makefile
+@@ -17,6 +17,9 @@ $(obj)/ctype.o: $(srctree)/lib/ctype.c FORCE
+ $(obj)/memcpy.o: $(srctree)/arch/riscv/lib/memcpy.S FORCE
+ 	$(call if_changed_rule,as_o_S)
+ 
++# Purgatory runs without kernel task or vector context management.
++AFLAGS_memcpy.o += -D__NO_VECTOR_MEMCPY
++
+ $(obj)/memset.o: $(srctree)/arch/riscv/lib/memset.S FORCE
+ 	$(call if_changed_rule,as_o_S)
+ 

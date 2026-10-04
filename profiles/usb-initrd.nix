@@ -59,7 +59,8 @@ in {
     # handoff policy explicitly as well as its recovery console.
     "watchdog.stop_on_reboot=0"
     "systemd.getty_auto=no" "udev.children_max=2"
-  ] ++ lib.optionals lcd [
+  ] ++ lib.optional (!config.sg2002.mitigations) "mitigations=off"
+  ++ lib.optionals lcd [
     # Standard fbcon takeover; the built-in 4x6 font gives 60x40 characters.
     # Stage 1 remains key-only SSH with a read-only local boot console.
     "fbcon=nodefer" "fbcon=font:MINI4x6" "consoleblank=0" "loglevel=7"
