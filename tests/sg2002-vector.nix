@@ -1,8 +1,9 @@
-{ pkgs, configurations }:
+{ pkgs, configurations, unmitigatedConfigurations }:
 let
   inherit (pkgs) lib;
   cc = pkgs.pkgsCross.riscv64.pkgsStatic.stdenv.cc;
   check = config:
+    assert config.sg2002.mitigations;
     assert !(builtins.elem "mitigations=off" config.boot.kernelParams);
     ''
       kernel=${config.boot.kernelPackages.kernel.configfile}
@@ -21,6 +22,11 @@ let
       test "$(fdtget -t s "$dtb" /cpus/cpu@0 riscv,isa)" = rv64imafdc
     '';
 in
+# Check the opt-out across SD and USB profiles, including USB's mkForce list.
+assert lib.all (config:
+  !config.sg2002.mitigations
+  && lib.count (param: param == "mitigations=off") config.boot.kernelParams == 1
+) unmitigatedConfigurations;
 pkgs.runCommand "sg2002-vector-tests" {
   nativeBuildInputs = [ pkgs.dtc pkgs.gnugrep cc ];
 } ''

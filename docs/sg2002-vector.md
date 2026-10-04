@@ -44,10 +44,18 @@ The [Ghostwrite researchers](https://ghostwriteattack.com/) identify C910
 and C920 as affected. Linux applies its mitigation to the shared T-Head
 CPU ID also used here.
 These tests do not establish that SG2002 is exploitable or unaffected.
-The diagnostic RAM boots used `mitigations=off`; that disables CPU
-mitigations broadly and is not part of any shipped boot configuration.
-With that lab override, `riscv_hwprobe` reports XTheadVector, while the
-standard V hardware capability remains clear.
+To enable vector access in a mainline NixOS configuration:
+
+```nix
+sg2002.mitigations = false;
+```
+
+The option defaults to `true`. Setting it to `false` adds `mitigations=off`
+to both SD and USB RAM boot command lines. This disables all CPU mitigations
+controlled by that argument, not just Ghostwrite. With it, `riscv_hwprobe`
+reports XTheadVector and the guarded kernel copy paths become available;
+the standard V hardware capability remains clear. The diagnostic RAM boots
+used this same boot argument. Ordinary scalar binaries retain their ISA.
 
 Three C906 details require a local context-handling fix:
 

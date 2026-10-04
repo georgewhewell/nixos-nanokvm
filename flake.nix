@@ -729,6 +729,9 @@
           sg2002-vector = import ./tests/sg2002-vector.nix {
             inherit pkgs;
             configurations = map checkedConfig catalog;
+            unmitigatedConfigurations = map (entry: checkedConfig (entry // {
+              modules = (entry.modules or [ ]) ++ [ { sg2002.mitigations = false; } ];
+            })) catalog;
           };
           sg2002-c906l-module-eval = import ./tests/sg2002-c906l-eval.nix {
             inherit
