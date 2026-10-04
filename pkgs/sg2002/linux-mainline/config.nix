@@ -471,6 +471,9 @@ with lib.kernel; {
   # NanoKVM HDMI capture path: LT6911 HDMI-to-MIPI bridge followed by the
   # SG2002 CSI MAC0 / VI DMA6 direct packed-YUV capture driver.
   MEDIA_SUPPORT = yes;
+  # TPU DMA jobs require the privileged command driver.
+  SG2002_TPU = yes;
+
   MEDIA_CAMERA_SUPPORT = yes;
   MEDIA_CONTROLLER = yes;
   VIDEO_DEV = yes;

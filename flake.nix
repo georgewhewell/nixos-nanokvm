@@ -139,6 +139,7 @@
           "sg2002-coda980-firmware"
           "sg2002-c906l-firmware"
           "sophgo-host-tools"
+          "sophgo-cvikernel"
         ];
 
       # Extra args threaded into every NixOS module via `_module.args`
@@ -449,6 +450,9 @@
             sg2002-h264-bridge
             sg2002-h264-bridge-pcma
             sg2002-kernel-mainline
+            sg2002-cvikernel
+            sg2002-cvikernel-host
+            sg2002-tpu
             sg2002-usb-boot
             sg2002-usb-boot-c906l
             sg2002-usb-boot-c906l-timer4

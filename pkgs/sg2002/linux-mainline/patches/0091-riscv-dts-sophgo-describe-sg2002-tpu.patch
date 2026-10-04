@@ -1,0 +1,25 @@
+From: George Whewell <george@whewell.io>
+Subject: [PATCH] riscv: dts: sophgo: describe the SG2002 TPU
+
+The master C906 TDMA interrupt is 76, not the slave C906L interrupt 52.
+
+--- a/arch/riscv/boot/dts/sophgo/sg2002.dtsi
++++ b/arch/riscv/boot/dts/sophgo/sg2002.dtsi
+@@ -22,6 +22,17 @@
+ 	soc {
+ 		interrupt-parent = <&plic>;
+ 		dma-noncoherent;
++
++		tpu: tpu@c100000 {
++			compatible = "sophgo,sg2002-tpu";
++			reg = <0x0c100000 0x1000>, <0x0c101000 0x1000>;
++			reg-names = "tdma", "tiu";
++			interrupts = <SOC_PERIPHERAL_IRQ(60) IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&clk CLK_TPU>, <&clk CLK_TPU_FAB>;
++			clock-names = "axi", "fabric";
++			resets = <&rst RST_TDMA>, <&rst RST_TPU>, <&rst RST_TPUSYS>;
++			reset-names = "tdma", "tiu", "system";
++		};
+ 
+ 		pinctrl: pinctrl@3001000 {
+ 			compatible = "sophgo,sg2002-pinctrl";

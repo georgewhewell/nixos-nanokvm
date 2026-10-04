@@ -58,6 +58,14 @@ let
       patch = ./patches/0085-nvmem-sg2002-efuse-derive-Sipeed-MAC-address.patch;
     })
     (patch {
+      name = "misc-sg2002-tpu";
+      patch = ./patches/0090-misc-add-sg2002-tpu.patch;
+    })
+    (patch {
+      name = "riscv-dts-sg2002-tpu";
+      patch = ./patches/0091-riscv-dts-sophgo-describe-sg2002-tpu.patch;
+    })
+    (patch {
       name = "clk-cv18xx-check-pll-lock-status";
       patch = ./patches/0074-clk-cv18xx-check-pll-lock-status.patch;
     })
@@ -391,6 +399,18 @@ let
       upstreamStatus = "local-only";
       dropWhen = "boards no longer need the MAC address Sipeed's firmware assigns";
       notes = "Reproduces Sipeed's S10uuid formula so a board keeps its MAC across vendor and mainline kernels.";
+    };
+    "misc-sg2002-tpu" = {
+      origin = "local; register sequencing from sophgo/osdrv sg200x-dev";
+      upstreamStatus = "local-only";
+      dropWhen = "Replaced by an upstream SG2002 accelerator driver";
+      notes = "Privileged DMA command interface; no unprivileged instruction sandbox.";
+    };
+    "riscv-dts-sg2002-tpu" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "SG2002 TPU node is available upstream";
+      notes = "Shared SoC node with master C906 TDMA interrupt 76.";
     };
     "clk-cv18xx-check-pll-lock-status" = {
       origin = "local";

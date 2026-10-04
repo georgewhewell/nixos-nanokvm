@@ -503,6 +503,13 @@ in
     bootCommand = "picoclaw_splash; fastboot usb 0";
   };
 
+  # CV181x instruction generation on the build host and on the SG2002.
+  sg2002-cvikernel = cross.callPackage ./sg2002/tpu/cvikernel.nix { };
+  sg2002-cvikernel-host = final.buildPackages.callPackage ./sg2002/tpu/cvikernel.nix { };
+  sg2002-tpu = cross.callPackage ./sg2002/tpu {
+    sophgo-cvikernel = final.sg2002-cvikernel;
+  };
+
   # Normal nixpkgs kernel + SG2002 patches + structured deltas (see
   # ./sg2002/linux-mainline/default.nix). No hand-rendered configfile.
   sg2002-kernel-mainline = cross.callPackage ./sg2002/linux-mainline { };
