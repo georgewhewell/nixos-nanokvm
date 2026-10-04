@@ -40,22 +40,26 @@ mitigation. **Normal boots still disable XTheadVector access** and report:
 Mitigation: xtheadvector disabled
 ```
 
-Linux applies that mitigation to the shared T-Head CPU ID used here.
+The [Ghostwrite researchers](https://ghostwriteattack.com/) identify C910
+and C920 as affected. Linux applies its mitigation to the shared T-Head
+CPU ID also used here.
 These tests do not establish that SG2002 is exploitable or unaffected.
 The diagnostic RAM boots used `mitigations=off`; that disables CPU
 mitigations broadly and is not part of any shipped boot configuration.
 With that lab override, `riscv_hwprobe` reports XTheadVector, while the
 standard V hardware capability remains clear.
 
-Two C906 details require a local context-handling fix:
+Three C906 details require a local context-handling fix:
 
 1. VXRM/VXSAT alias FCSR bits 10:8. Restoring another task's FCSR before
    saving the outgoing vector controls loses its rounding/saturation state.
 2. Writes to VXRM/VXSAT dirty FS but leave VS clean. The vector controls
    therefore need saving even when the vector register file is clean.
+3. Trap entry must clear both T-Head VS bits. The standard mask left VS
+   partly enabled during interrupts, confusing preemptible vector ownership.
 
 Patch 0082 fixes the save order and dirty-state handling, and checks the
-T-Head VS bits when managing preemptible kernel vector contexts.
+T-Head VS bits at trap entry and when managing preemptible kernel contexts.
 
 ## Reproduce the userspace checks
 
@@ -84,7 +88,10 @@ vector registers and controls before returning. Each worker must observe
 both signals and involuntary context switches; there are 4,000 checks in
 total. Guard bytes detect stores outside the expected 512-byte context.
 An explicit syscall is not a valid preservation test: Linux is allowed
-to discard vector state at syscall entry.
+to discard vector state at syscall entry. The combined kernel passed nine
+runs (36,000 checks), including concurrent usercopy and kernel-copy tests,
+without kernel warnings. The normal mitigated boot passed
+`--expect-disabled`, all 4,864 usercopy cases and the kernel-copy module.
 
 ## Compiler use
 
@@ -110,3 +117,18 @@ Sipeed USB/IIC0 settings and shared AIC8800 wiring. The B-W overlay now
 contains only the Nano B-W identity; PCIe no longer inherits that model
 or its compatible strings. Camera, display and auxiliary-core overlays
 remain specific to their selected carrier/profile.
+
+## Kernel copies
+
+Patches 0083/0084 use an `e8,m8` byte-vector loop for large copies whose
+source and destination have different offsets modulo eight. Copies with
+matching alignment retain the faster scalar word loop. User copies keep
+the existing fault recovery and SIMD-context checks, with a minimum of
+1,024 bytes as well as the normal tunable vector threshold.
+
+`sg2002-usercopy-test` (built by the same check above) exercises pipe
+read/write copies over size/alignment combinations, guard-page faults and
+demand paging. `--bench` times aligned and offset pipe round trips.
+See [kernel memcpy measurements and reproduction](sg2002-memcpy.md) for
+the kernel-only test. Both optimizations obey the existing mitigation
+policy and leave ordinary kernel C compilation scalar.

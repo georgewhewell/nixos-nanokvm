@@ -1,0 +1,108 @@
+From: NanoKVM contributors
+Subject: [PATCH] riscv: use XTheadVector for misaligned large user copies
+
+Select the vector user-copy path for XTheadVector when the extension is
+usable after mitigation policy and source/destination word alignments
+differ. C906 measurements favour scalar word copies for matching
+alignments. Require at least 1024 bytes as well as the existing tunable
+threshold; supply a draft 0.7.1 byte loop and retain the SIMD-context
+check, SUM handling and scalar fault fallback.
+
+Keep ratified-V selection unchanged. Use the assembler-visible vendor
+extension keys from patch 0082.
+
+diff --git a/arch/riscv/lib/uaccess.S b/arch/riscv/lib/uaccess.S
+--- a/arch/riscv/lib/uaccess.S
++++ b/arch/riscv/lib/uaccess.S
+@@ -5,6 +5,10 @@
+ #include <asm/csr.h>
+ #include <asm/hwcap.h>
+ #include <asm/alternative-macros.h>
++#include <asm/vendorid_list.h>
++#include <asm/vendor_extensions/thead.h>
++
++#define XTHEADVECTOR_ALT (RISCV_VENDOR_EXT_ALTERNATIVES_BASE + RISCV_ISA_VENDOR_EXT_XTHEADVECTOR)
+ 
+ 	.macro fixup op reg addr lbl
+ 100:
+@@ -14,7 +18,16 @@
+ 
+ SYM_FUNC_START(__asm_copy_to_user)
+ #ifdef CONFIG_RISCV_ISA_V
+-	ALTERNATIVE("j fallback_scalar_usercopy", "nop", 0, RISCV_ISA_EXT_ZVE32X, CONFIG_RISCV_ISA_V)
++	ALTERNATIVE_2("j fallback_scalar_usercopy", \
++		      "j .Lvector_usercopy", 0, RISCV_ISA_EXT_ZVE32X, CONFIG_RISCV_ISA_V, \
++		      "nop", THEAD_VENDOR_ID, XTHEADVECTOR_ALT, CONFIG_RISCV_ISA_XTHEADVECTOR)
++	/* C906 scalar word copies win when the alignments match. */
++	xor	t0, a0, a1
++	andi	t0, t0, SZREG-1
++	beqz	t0, fallback_scalar_usercopy
++	li	t0, 1024
++	bltu	a2, t0, fallback_scalar_usercopy
++.Lvector_usercopy:
+ 	REG_L	t0, riscv_v_usercopy_threshold
+ 	bltu	a2, t0, fallback_scalar_usercopy
+ 	li	a3, 1
+@@ -42,7 +55,16 @@
+ 
+ SYM_FUNC_START(__asm_copy_to_user_sum_enabled)
+ #ifdef CONFIG_RISCV_ISA_V
+-	ALTERNATIVE("j fallback_scalar_usercopy_sum_enabled", "nop", 0, RISCV_ISA_EXT_ZVE32X, CONFIG_RISCV_ISA_V)
++	ALTERNATIVE_2("j fallback_scalar_usercopy_sum_enabled", \
++		      "j .Lvector_usercopy_sum_enabled", 0, RISCV_ISA_EXT_ZVE32X, CONFIG_RISCV_ISA_V, \
++		      "nop", THEAD_VENDOR_ID, XTHEADVECTOR_ALT, CONFIG_RISCV_ISA_XTHEADVECTOR)
++	/* C906 scalar word copies win when the alignments match. */
++	xor	t0, a0, a1
++	andi	t0, t0, SZREG-1
++	beqz	t0, fallback_scalar_usercopy_sum_enabled
++	li	t0, 1024
++	bltu	a2, t0, fallback_scalar_usercopy_sum_enabled
++.Lvector_usercopy_sum_enabled:
+ 	REG_L	t0, riscv_v_usercopy_threshold
+ 	bltu	a2, t0, fallback_scalar_usercopy_sum_enabled
+ 	li	a3, 0
+diff --git a/arch/riscv/lib/uaccess_vector.S b/arch/riscv/lib/uaccess_vector.S
+--- a/arch/riscv/lib/uaccess_vector.S
++++ b/arch/riscv/lib/uaccess_vector.S
+@@ -4,6 +4,11 @@
+ #include <asm/asm.h>
+ #include <asm/asm-extable.h>
+ #include <asm/csr.h>
++#include <asm/alternative-macros.h>
++#include <asm/vendorid_list.h>
++#include <asm/vendor_extensions/thead.h>
++
++#define XTHEADVECTOR_ALT (RISCV_VENDOR_EXT_ALTERNATIVES_BASE + RISCV_ISA_VENDOR_EXT_XTHEADVECTOR)
+ 
+ #define pDst a0
+ #define pSrc a1
+@@ -36,6 +41,8 @@
+ SYM_FUNC_END(__asm_vector_usercopy)
+ 
+ SYM_FUNC_START(__asm_vector_usercopy_sum_enabled)
++	ALTERNATIVE("nop", "j .Lthead_loop", THEAD_VENDOR_ID,
++		    XTHEADVECTOR_ALT, CONFIG_RISCV_ISA_XTHEADVECTOR)
+ loop:
+ 	vsetvli iVL, iNum, e8, ELEM_LMUL_SETTING, ta, ma
+ 	fixup vle8.v vData, (pSrc), 10f
+@@ -58,4 +65,20 @@
+ 	csrr	t2, CSR_VSTART
+ 	sub	iNum, iNum, t2
+ 	j	10b
++#ifdef CONFIG_RISCV_ISA_XTHEADVECTOR
++.Lthead_loop:
++	/* th.vsetvli a3, a2, e8, m8: no RVV 1.0 tail/mask policy bits. */
++	.4byte 0x003676d7
++.Lthead_load:
++	.4byte 0x02058007 /* th.vlbu.v v0, (a1) */
++	_asm_extable .Lthead_load, 10b
++	sub iNum, iNum, iVL
++	add pSrc, pSrc, iVL
++.Lthead_store:
++	.4byte 0x02050027 /* th.vsb.v v0, (a0) */
++	_asm_extable .Lthead_store, 11b
++	add pDst, pDst, iVL
++	bnez iNum, .Lthead_loop
++	j 10b
++#endif
+ SYM_FUNC_END(__asm_vector_usercopy_sum_enabled)

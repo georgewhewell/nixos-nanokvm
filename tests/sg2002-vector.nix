@@ -30,4 +30,6 @@ pkgs.runCommand "sg2002-vector-tests" {
   ${cc.targetPrefix}gcc -O2 -Wall -Wextra -Werror -static -march=rv64gc \
     ${./sg2002-vector.c} ${./sg2002-vector-context.S} \
     -o "$out/bin/sg2002-vector-test"
+  ${cc.targetPrefix}gcc -O2 -Wall -Wextra -Werror -static -march=rv64gc \
+    ${./sg2002-usercopy.c} -o "$out/bin/sg2002-usercopy-test"
 ''
