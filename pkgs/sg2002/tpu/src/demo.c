@@ -23,17 +23,24 @@ static int8_t saturate(int value)
     return value < -128 ? -128 : value > 127 ? 127 : value;
 }
 
-static int run_context(int fd, cvk_context_t *ctx, const uint32_t bases[8])
+static int capture(cvk_context_t *ctx, struct sg2002_tpu_stream *stream,
+                   const uint32_t bases[8])
 {
     uint32_t bytes;
-    uint8_t *commands = ctx->ops->acquire_cmdbuf(ctx, &bytes);
-    return sg2002_tpu_run(fd, commands, bytes, bases, 0);
+    const void *raw = ctx->ops->acquire_cmdbuf(ctx, &bytes);
+    void *commands = malloc(bytes);
+    if (!commands)
+        return -1;
+    memcpy(commands, raw, bytes);
+    *stream = (struct sg2002_tpu_stream){ commands, bytes, bases };
+    return 0;
 }
 
 static int matrix(int fd, unsigned m, unsigned k, unsigned n, unsigned iterations,
                   unsigned seed, bool split)
 {
     int ret = -1;
+    struct sg2002_tpu_stream streams[3] = {0};
     unsigned input_bytes = m * k + k * n, output_bytes = m * n;
     int8_t *input = malloc(input_bytes), *output = malloc(output_bytes);
     int8_t *reference = malloc(output_bytes);
@@ -121,26 +128,31 @@ static int matrix(int fd, unsigned m, unsigned k, unsigned n, unsigned iteration
     cpu = now(CLOCK_PROCESS_CPUTIME_ID) - cpu;
     double elapsed = now(CLOCK_MONOTONIC) - start;
     if (split) {
-        /* Independently exercise TDMA-only and TIU-only submissions. ID reset
-         * must preserve local tensor SRAM between these three jobs. */
+        /* ID reset preserves local SRAM between these atomic batch segments. */
         ctx->ops->reset(ctx);
         ctx->ops->tdma_g2l_matrix_copy(ctx, &load_a);
         ctx->ops->tdma_g2l_matrix_copy(ctx, &load_b);
-        if (run_context(fd, ctx, bases))
+        if (capture(ctx, &streams[0], bases))
             goto done;
         ctx->ops->reset(ctx);
         ctx->ops->tiu_matrix_multiplication(ctx, &multiply);
-        if (run_context(fd, ctx, bases))
+        if (capture(ctx, &streams[1], bases))
             goto done;
         ctx->ops->reset(ctx);
         ctx->ops->tdma_l2g_matrix_copy(ctx, &store);
-        if (run_context(fd, ctx, bases) ||
-            sg2002_tpu_read(fd, &buffer, out_offset, output, output_bytes))
+        if (capture(ctx, &streams[2], bases))
             goto done;
-        if (memcmp(output, reference, output_bytes)) {
-            errno = EILSEQ;
-            fprintf(stderr, "isolated TIU/TDMA output differs\n");
-            goto done;
+        for (unsigned iteration = 0; iteration < iterations; iteration++) {
+            memset(output, 0x5a, output_bytes);
+            if (sg2002_tpu_write(fd, &buffer, out_offset, output, output_bytes) ||
+                sg2002_tpu_run_batch(fd, streams, 3, 0) ||
+                sg2002_tpu_read(fd, &buffer, out_offset, output, output_bytes))
+                goto done;
+            if (memcmp(output, reference, output_bytes)) {
+                errno = EILSEQ;
+                fprintf(stderr, "batched TIU/TDMA output differs\n");
+                goto done;
+            }
         }
     }
     printf("PASS INT8 %ux%ux%u seed=%u runs=%u wall=%.3f ms/job cpu=%.3f ms/job CPU-reference=%.3f ms\n",
@@ -148,6 +160,8 @@ static int matrix(int fd, unsigned m, unsigned k, unsigned n, unsigned iteration
            cpu * 1000 / iterations, reference_cpu * 1000);
     ret = 0;
 done:
+    for (unsigned i = 0; i < 3; i++)
+        free((void *)streams[i].commands);
     if (ret)
         perror("TPU matrix");
     if (buffer.handle && sg2002_tpu_free(fd, &buffer)) {
@@ -177,6 +191,12 @@ static int negative_tests(int fd)
     if (sg2002_tpu_alloc(fd, 1, &b))
         return -1;
     if (sg2002_tpu_write(fd, &b, b.size, &data, 1) != -1 || errno != EINVAL)
+        return -1;
+    struct sg2002_tpu_batch batch = {0};
+    if (ioctl(fd, SG2002_TPU_BATCH, &batch) != -1 || errno != EINVAL)
+        return -1;
+    batch.count = SG2002_TPU_MAX_BATCH + 1;
+    if (ioctl(fd, SG2002_TPU_BATCH, &batch) != -1 || errno != EINVAL)
         return -1;
     struct sg2002_tpu_submit empty = {0};
     if (ioctl(fd, SG2002_TPU_SUBMIT, &empty) != -1 || errno != EINVAL)

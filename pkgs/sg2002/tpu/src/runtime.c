@@ -64,8 +64,9 @@ int sg2002_tpu_read(int fd, const struct sg2002_tpu_buffer *b, uint32_t offset,
     return transfer(fd, b, offset, data, bytes, SG2002_TPU_READ);
 }
 
-int sg2002_tpu_run(int fd, const void *commands, size_t bytes,
-                   const uint32_t bases[8], uint32_t timeout_ms)
+static int prepare(const void *commands, size_t bytes,
+                   const uint32_t bases[8], uint32_t timeout_ms,
+                   struct sg2002_tpu_submit *out)
 {
     const uint8_t *src = commands;
     struct sg2002_tpu_submit job = { .timeout_ms = timeout_ms };
@@ -73,7 +74,7 @@ int sg2002_tpu_run(int fd, const void *commands, size_t bytes,
     size_t offset = 0;
     int ret = -1, saved;
 
-    if (!bytes || bytes > 4096 * (120 + 72) || !commands) {
+    if (!bytes || bytes > UINT16_MAX * (120 + 72) || !commands) {
         errno = EINVAL;
         return -1;
     }
@@ -90,7 +91,7 @@ int sg2002_tpu_run(int fd, const void *commands, size_t bytes,
             job.tiu_count++;
         else
             job.tdma_count++;
-        if (job.tiu_count > 4096 || job.tdma_count > 4096)
+        if (job.tiu_count > UINT16_MAX || job.tdma_count > UINT16_MAX)
             goto invalid;
         offset += 8 + length;
     }
@@ -126,14 +127,58 @@ int sg2002_tpu_run(int fd, const void *commands, size_t bytes,
     job.tdma = (uintptr_t)tdma;
     if (bases)
         memcpy(job.base_handles, bases, sizeof(job.base_handles));
-    ret = ioctl(fd, SG2002_TPU_SUBMIT, &job);
-    goto done;
+    *out = job;
+    return 0;
 invalid:
     errno = EINVAL;
 done:
     saved = errno;
     free(tiu);
     free(tdma);
+    errno = saved;
+    return ret;
+}
+
+static void free_job(struct sg2002_tpu_submit *job)
+{
+    free((void *)(uintptr_t)job->tiu);
+    free((void *)(uintptr_t)job->tdma);
+}
+
+int sg2002_tpu_run(int fd, const void *commands, size_t bytes,
+                   const uint32_t bases[8], uint32_t timeout_ms)
+{
+    struct sg2002_tpu_submit job;
+    if (prepare(commands, bytes, bases, timeout_ms, &job))
+        return -1;
+    int ret = ioctl(fd, SG2002_TPU_SUBMIT, &job), saved = errno;
+    free_job(&job);
+    errno = saved;
+    return ret;
+}
+
+int sg2002_tpu_run_batch(int fd, const struct sg2002_tpu_stream *streams,
+                         unsigned count, uint32_t timeout_ms)
+{
+    if (!streams || !count || count > SG2002_TPU_MAX_BATCH) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct sg2002_tpu_submit *jobs = calloc(count, sizeof(*jobs));
+    if (!jobs)
+        return -1;
+    int ret = -1, saved;
+    for (unsigned i = 0; i < count; i++)
+        if (prepare(streams[i].commands, streams[i].bytes,
+                    streams[i].base_handles, timeout_ms, &jobs[i]))
+            goto done;
+    struct sg2002_tpu_batch batch = { .jobs = (uintptr_t)jobs, .count = count };
+    ret = ioctl(fd, SG2002_TPU_BATCH, &batch);
+done:
+    saved = errno;
+    for (unsigned i = 0; i < count; i++)
+        free_job(&jobs[i]);
+    free(jobs);
     errno = saved;
     return ret;
 }

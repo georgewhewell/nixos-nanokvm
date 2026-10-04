@@ -7,6 +7,7 @@
 #define SG2002_TPU_ABI_VERSION 1
 #define SG2002_TPU_TIU_BYTES 112
 #define SG2002_TPU_TDMA_BYTES 64
+#define SG2002_TPU_MAX_BATCH 64
 
 struct sg2002_tpu_info {
 	__u32 abi_version;
@@ -40,10 +41,20 @@ struct sg2002_tpu_submit {
 	__u32 reserved;
 };
 
+/* Execute segments without another client's job between them. Stop at the
+ * first failure; already completed segments are not rolled back.
+ */
+struct sg2002_tpu_batch {
+	__u64 jobs; /* array of struct sg2002_tpu_submit */
+	__u32 count;
+	__u32 reserved;
+};
+
 #define SG2002_TPU_INFO _IOR('T', 0x00, struct sg2002_tpu_info)
 #define SG2002_TPU_ALLOC _IOWR('T', 0x01, struct sg2002_tpu_buffer)
 #define SG2002_TPU_FREE _IOW('T', 0x02, struct sg2002_tpu_buffer)
 #define SG2002_TPU_WRITE _IOW('T', 0x03, struct sg2002_tpu_transfer)
 #define SG2002_TPU_READ _IOW('T', 0x04, struct sg2002_tpu_transfer)
 #define SG2002_TPU_SUBMIT _IOW('T', 0x05, struct sg2002_tpu_submit)
+#define SG2002_TPU_BATCH _IOW('T', 0x06, struct sg2002_tpu_batch)
 #endif

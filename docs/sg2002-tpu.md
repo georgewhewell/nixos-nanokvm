@@ -9,7 +9,7 @@ hardware output byte-for-byte with a CPU reference; it has no software fallback.
 nix build .#sg2002-tpu
 # On a board booted with this kernel:
 sudo ./result/bin/sg2002-tpu-demo 100
-# Check each engine separately, with no other TPU clients running:
+# Check independent TIU/TDMA segments in one atomic batch:
 sudo ./result/bin/sg2002-tpu-demo 1 --split
 ```
 
@@ -28,8 +28,10 @@ the kernel driver is GPL-2.0-only.
 Applications allocate owned DMA buffers with `sg2002_tpu_alloc`, copy data with
 `sg2002_tpu_write/read`, generate operations using `cvikernel`, and pass the
 resulting command stream to `sg2002_tpu_run`. The installed `demo.c` shows the
-complete sequence. Each submission accepts up to 4096 descriptors per engine;
-split larger workloads at synchronization boundaries. The raw kernel interface
+complete sequence. Each submission accepts up to 65535 descriptors per engine;
+`sg2002_tpu_run_batch` executes up to 64 streams atomically at synchronization
+boundaries, preserving local SRAM between segments. A batch stops at its first
+error; earlier completed segments are not rolled back. The raw kernel interface
 also accepts TIU-only and TDMA-only jobs. The library accepts CV181x command
 streams, not `.cvimodel` files; it does not provide the vendor model loader or
 CPU-layer implementation.
@@ -41,7 +43,7 @@ untrusted process. Buffer handles are per open file; all transfers, jobs and
 frees are serialized. Command lists are copied before execution.
 TPU/fabric clocks run from the first open until the last close; idle support
 does not keep the accelerator clocked. Tensor SRAM is shared between clients,
-so a complete operation must be submitted as one job. Coherent DMA
+so dependent segments must be submitted in one job or atomic batch. Coherent DMA
 allocations use the Linux DMA API on the noncoherent C906; ION and `/dev/mem` are
 not used. The driver reserves no static RAM carveout and shares the ordinary
 contiguous allocator with other devices.
@@ -63,7 +65,9 @@ Tested on the Ethernet/camera LicheeRV Nano attached to `strix-3`, using a
 RAM-booted Linux 7.2.8 image; storage was not written. Validation passed
 48,000 checked jobs from two concurrent processes, 2,400 repeat jobs, isolated
 TIU/TDMA jobs, buffer bounds, file-handle ownership, and dropped-privilege access.
-SIGINT during a workload returned 130; a following demo passed. An injected
+An atomic-batch extension additionally passed 4,800 three-segment matrix
+operations from two concurrent processes, and 5,000/65,535-descriptor TDMA jobs
+with guard checks. SIGINT during a workload returned 130; a following demo passed. An injected
 unreachable synchronization ID returned `ETIMEDOUT`, after which operations
 returned `ENODEV` and DMA allocations remained quarantined. The final driver
 showed clock counts 0/1/0 before open, while open and after close; following

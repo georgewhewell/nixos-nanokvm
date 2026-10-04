@@ -6,7 +6,10 @@
 stdenv.mkDerivation {
   pname = "sg2002-tpu";
   version = "0.1";
-  src = ./.;
+  src = lib.fileset.toSource {
+    root = ./.;
+    fileset = lib.fileset.unions [ ./include ./src ./tests ];
+  };
   buildInputs = [ sophgo-cvikernel ];
   buildPhase = ''
     runHook preBuild
@@ -18,11 +21,14 @@ stdenv.mkDerivation {
       libsg2002-tpu.a -lcvikernel -o sg2002-tpu-demo
     $CC -std=gnu11 -O2 -Wall -Wextra -Werror -Iinclude tests/timeout.c \
       libsg2002-tpu.a -o sg2002-tpu-timeout-test
+    $CC -std=gnu11 -O2 -Wall -Wextra -Werror -Iinclude tests/large.c \
+      libsg2002-tpu.a -lcvikernel -o sg2002-tpu-large-test
     runHook postBuild
   '';
   installPhase = ''
     runHook preInstall
     install -Dm755 sg2002-tpu-demo $out/bin/sg2002-tpu-demo
+    install -Dm755 sg2002-tpu-large-test $out/libexec/sg2002-tpu-large-test
     install -Dm755 sg2002-tpu-timeout-test $out/libexec/sg2002-tpu-timeout-test
     install -Dm755 libsg2002-tpu.so.0 $out/lib/libsg2002-tpu.so.0
     ln -s libsg2002-tpu.so.0 $out/lib/libsg2002-tpu.so

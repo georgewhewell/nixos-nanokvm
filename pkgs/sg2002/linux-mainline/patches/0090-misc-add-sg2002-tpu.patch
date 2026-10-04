@@ -32,7 +32,7 @@ interdrv/tpu/hal/cv181x, Copyright Cvitek 2019-2021.
 +obj-$(CONFIG_SG2002_TPU)		+= sg2002-tpu.o
 --- /dev/null
 +++ b/drivers/misc/sg2002-tpu.c
-@@ -0,0 +1,557 @@
+@@ -0,0 +1,583 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * SG2002/CV181x Tensor Processing Unit.
@@ -62,7 +62,7 @@ interdrv/tpu/hal/cv181x, Copyright Cvitek 2019-2021.
 +#include <linux/xarray.h>
 +#include <uapi/linux/sg2002_tpu.h>
 +
-+#define TPU_MAX_COMMANDS 4096
++#define TPU_MAX_COMMANDS U16_MAX
 +#define TPU_MAX_MEMORY SZ_32M
 +#define TDMA_CTRL 0x00
 +#define TDMA_DES_BASE 0x04
@@ -303,10 +303,9 @@ interdrv/tpu/hal/cv181x, Copyright Cvitek 2019-2021.
 +			    req.size) ? -EFAULT : 0;
 +}
 +
-+static int tpu_submit(struct tpu_file *f, void __user *arg)
++static int tpu_submit(struct tpu_file *f, const struct sg2002_tpu_submit *req)
 +{
 +	struct sg2002_tpu *t = f->tpu;
-+	struct sg2002_tpu_submit req;
 +	struct tpu_buffer *b;
 +	void *commands;
 +	dma_addr_t dma;
@@ -315,32 +314,30 @@ interdrv/tpu/hal/cv181x, Copyright Cvitek 2019-2021.
 +	int i, ret;
 +	long waited;
 +
-+	if (copy_from_user(&req, arg, sizeof(req)))
-+		return -EFAULT;
-+	if (req.reserved || req.timeout_ms > 10000 ||
-+	    req.tiu_count > TPU_MAX_COMMANDS || req.tdma_count > TPU_MAX_COMMANDS ||
-+	    (!req.tiu_count && !req.tdma_count))
++	if (req->reserved || req->timeout_ms > 10000 ||
++	    req->tiu_count > TPU_MAX_COMMANDS || req->tdma_count > TPU_MAX_COMMANDS ||
++	    (!req->tiu_count && !req->tdma_count))
 +		return -EINVAL;
 +	for (i = 0; i < ARRAY_SIZE(bases); i++) {
 +		bases[i] = 0;
-+		if (!req.base_handles[i])
++		if (!req->base_handles[i])
 +			continue;
-+		b = xa_load(&f->buffers, req.base_handles[i]);
++		b = xa_load(&f->buffers, req->base_handles[i]);
 +		if (!b)
 +			return -ENOENT;
 +		bases[i] = b->dma;
 +	}
-+	timeout = req.timeout_ms ?: 2000;
++	timeout = req->timeout_ms ?: 2000;
 +	/* TIU prefetch reads 128 bytes beyond the last 112-byte descriptor. */
-+	tdma_offset = ALIGN(req.tiu_count * SG2002_TPU_TIU_BYTES + 128, 256);
-+	size = tdma_offset + req.tdma_count * SG2002_TPU_TDMA_BYTES;
++	tdma_offset = ALIGN(req->tiu_count * SG2002_TPU_TIU_BYTES + 128, 256);
++	size = tdma_offset + req->tdma_count * SG2002_TPU_TDMA_BYTES;
 +	commands = dma_alloc_coherent(t->dev, size, &dma, GFP_KERNEL);
 +	if (!commands)
 +		return -ENOMEM;
-+	if (copy_from_user(commands, u64_to_user_ptr(req.tiu),
-+			   req.tiu_count * SG2002_TPU_TIU_BYTES) ||
-+	    copy_from_user(commands + tdma_offset, u64_to_user_ptr(req.tdma),
-+			   req.tdma_count * SG2002_TPU_TDMA_BYTES)) {
++	if (copy_from_user(commands, u64_to_user_ptr(req->tiu),
++			   req->tiu_count * SG2002_TPU_TIU_BYTES) ||
++	    copy_from_user(commands + tdma_offset, u64_to_user_ptr(req->tdma),
++			   req->tdma_count * SG2002_TPU_TDMA_BYTES)) {
 +		ret = -EFAULT;
 +		goto free;
 +	}
@@ -360,18 +357,18 @@ interdrv/tpu/hal/cv181x, Copyright Cvitek 2019-2021.
 +	writel(0, t->tdma + 0x90);
 +	writel(0, t->tdma + 0x94);
 +	dma_wmb();
-+	if (req.tiu_count) {
++	if (req->tiu_count) {
 +		writel(lower_32_bits(dma), t->tiu + TIU_CTRL + 4);
 +		writel(0, t->tiu + TIU_CTRL + 8);
 +		writel(BIT(11), t->tiu + TIU_CTRL + 12);
 +		writel(3 << 22 | BIT(30) | BIT(31) | BIT(0), t->tiu + TIU_CTRL);
 +	}
-+	if (req.tdma_count) {
++	if (req->tdma_count) {
 +		writel((dma + tdma_offset) >> 6, t->tdma + TDMA_DES_BASE);
 +		writel(0, t->tdma + 0xa0);
 +		writel(0, t->tdma + 0xa4);
 +		writel(BIT(5), t->tdma + TDMA_INT);
-+		writel(req.tdma_count << 16 | BIT(13) | BIT(10) | 3 << 8 |
++		writel(req->tdma_count << 16 | BIT(13) | BIT(10) | 3 << 8 |
 +		       BIT(5) | BIT(1) | BIT(0), t->tdma + TDMA_CTRL);
 +		waited = wait_for_completion_timeout(&t->done,
 +							msecs_to_jiffies(timeout));
@@ -379,15 +376,15 @@ interdrv/tpu/hal/cv181x, Copyright Cvitek 2019-2021.
 +		if (ret)
 +			goto recover;
 +		if (READ_ONCE(t->irq_status) != 1 ||
-+		    (readl(t->tdma + TDMA_SYNC) >> 16) < req.tdma_count) {
++		    (readl(t->tdma + TDMA_SYNC) >> 16) < req->tdma_count) {
 +			ret = -EIO;
 +			goto recover;
 +		}
 +	}
 +	ret = 0;
-+	if (req.tiu_count)
++	if (req->tiu_count)
 +		ret = readl_poll_timeout(t->tiu + TIU_CTRL, value,
-+			(value & BIT(1)) && ((value >> 6) & 0xffff) >= req.tiu_count,
++			(value & BIT(1)) && ((value >> 6) & 0xffff) >= req->tiu_count,
 +			50, timeout * 1000);
 +	if (ret)
 +		goto recover;
@@ -403,12 +400,37 @@ interdrv/tpu/hal/cv181x, Copyright Cvitek 2019-2021.
 +	return ret;
 +}
 +
++/* The device mutex spans every segment, preserving local SRAM dependencies. */
++static int tpu_batch(struct tpu_file *f, void __user *arg)
++{
++	struct sg2002_tpu_batch req;
++	struct sg2002_tpu_submit *jobs;
++	unsigned int i;
++	int ret = 0;
++
++	if (copy_from_user(&req, arg, sizeof(req)))
++		return -EFAULT;
++	if (req.reserved || !req.count || req.count > SG2002_TPU_MAX_BATCH)
++		return -EINVAL;
++	jobs = memdup_user(u64_to_user_ptr(req.jobs), req.count * sizeof(*jobs));
++	if (IS_ERR(jobs))
++		return PTR_ERR(jobs);
++	for (i = 0; i < req.count; i++) {
++		ret = tpu_submit(f, &jobs[i]);
++		if (ret)
++			break;
++	}
++	kfree(jobs);
++	return ret;
++}
++
 +static long tpu_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 +{
 +	struct tpu_file *f = file->private_data;
 +	struct sg2002_tpu *t = f->tpu;
 +	void __user *up = (void __user *)arg;
 +	struct sg2002_tpu_buffer req;
++	struct sg2002_tpu_submit job;
 +	struct sg2002_tpu_info info = {
 +		.abi_version = SG2002_TPU_ABI_VERSION,
 +		.max_commands = TPU_MAX_COMMANDS,
@@ -449,7 +471,11 @@ interdrv/tpu/hal/cv181x, Copyright Cvitek 2019-2021.
 +		ret = tpu_transfer(f, up, cmd == SG2002_TPU_WRITE);
 +		break;
 +	case SG2002_TPU_SUBMIT:
-+		ret = tpu_submit(f, up);
++		ret = copy_from_user(&job, up, sizeof(job)) ? -EFAULT :
++			tpu_submit(f, &job);
++		break;
++	case SG2002_TPU_BATCH:
++		ret = tpu_batch(f, up);
 +		break;
 +	default:
 +		ret = -ENOTTY;
@@ -592,7 +618,7 @@ interdrv/tpu/hal/cv181x, Copyright Cvitek 2019-2021.
 +MODULE_LICENSE("GPL");
 --- /dev/null
 +++ b/include/uapi/linux/sg2002_tpu.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,60 @@
 +/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 +#ifndef _UAPI_SG2002_TPU_H
 +#define _UAPI_SG2002_TPU_H
@@ -602,6 +628,7 @@ interdrv/tpu/hal/cv181x, Copyright Cvitek 2019-2021.
 +#define SG2002_TPU_ABI_VERSION 1
 +#define SG2002_TPU_TIU_BYTES 112
 +#define SG2002_TPU_TDMA_BYTES 64
++#define SG2002_TPU_MAX_BATCH 64
 +
 +struct sg2002_tpu_info {
 +	__u32 abi_version;
@@ -635,12 +662,22 @@ interdrv/tpu/hal/cv181x, Copyright Cvitek 2019-2021.
 +	__u32 reserved;
 +};
 +
++/* Execute segments without another client's job between them. Stop at the
++ * first failure; already completed segments are not rolled back.
++ */
++struct sg2002_tpu_batch {
++	__u64 jobs; /* array of struct sg2002_tpu_submit */
++	__u32 count;
++	__u32 reserved;
++};
++
 +#define SG2002_TPU_INFO _IOR('T', 0x00, struct sg2002_tpu_info)
 +#define SG2002_TPU_ALLOC _IOWR('T', 0x01, struct sg2002_tpu_buffer)
 +#define SG2002_TPU_FREE _IOW('T', 0x02, struct sg2002_tpu_buffer)
 +#define SG2002_TPU_WRITE _IOW('T', 0x03, struct sg2002_tpu_transfer)
 +#define SG2002_TPU_READ _IOW('T', 0x04, struct sg2002_tpu_transfer)
 +#define SG2002_TPU_SUBMIT _IOW('T', 0x05, struct sg2002_tpu_submit)
++#define SG2002_TPU_BATCH _IOW('T', 0x06, struct sg2002_tpu_batch)
 +#endif
 --- /dev/null
 +++ b/Documentation/devicetree/bindings/misc/sophgo,sg2002-tpu.yaml
