@@ -82,3 +82,69 @@ The explicit fault helper is installed under `libexec/sg2002-tpu-timeout-test`.
 Running it with `--require-board-reset` intentionally poisons the TPU until the
 board is rebooted; it is excluded from the ordinary demo. Arm the board's RAM
 boot recovery first when testing a diskless image.
+
+## Vendor model examples
+
+`sg2002-cviruntime` builds the vendor `.cvimodel` loader and CPU operators from
+[pinned source](https://github.com/sophgo/cviruntime/tree/ef8044988c2b4a5d491125d13e6f048b5f8a1389).
+Its SG2002 backend uses owned DMA allocations, explicit copies and atomic TPU
+batches. Encrypted models requiring vendor trusted firmware and PMU capture are
+unsupported. Kernel errors propagate through `CVI_NN_Forward`; there is no
+simulator fallback. Applications can use the installed `cviruntime.h` API.
+
+`sg2002-tpu-examples` builds the vendor MobileNet classifier and YOLOv5 detector
+with a small OpenCV configuration. Both take JPEG images, reject incompatible
+model layouts, check inference errors and optionally compare repeated outputs.
+Image decoding, output conversion and detection postprocessing run on the CPU.
+The upstream runtime, schema generator and samples have no repository license
+grant at these revisions; their Nix packages are marked unfree.
+
+Build the examples and models on an x86_64 Linux build host:
+
+```sh
+nix build .#sg2002-tpu-examples -o result-examples
+nix build .#sg2002-tpu-mobilenet-v2 -o result-mobilenet
+nix build .#sg2002-tpu-yolov5n -o result-yolo
+```
+
+Run on the SG2002 after installing those closures:
+
+```sh
+sudo ./result-examples/bin/sg2002-tpu-classify \
+  ./result-mobilenet/mobilenet_v2.cvimodel ./result-mobilenet/cat.jpg \
+  ./result-examples/share/sg2002-tpu-examples/synset_words.txt 100
+sudo ./result-examples/bin/sg2002-tpu-detect \
+  ./result-yolo/yolov5n.cvimodel ./result-yolo/dog.jpg detected.jpg 20
+sudo ./result-examples/bin/sg2002-tpu-model-check \
+  ./result-yolo/yolov5n.cvimodel ./result-yolo/input.bin ./result-yolo/reference.bin 10
+```
+
+The reference checker accepts a raw input tensor and concatenated little-endian
+FP32 reference outputs in model order. It fails if any output differs beyond
+`1e-6 * max(1, abs(reference))`, or if repeated inference changes a byte. The
+model packages include these inputs and references from the vendor CModel.
+
+`sg2002-tpu-mlir` packages the pinned Sophgo 1.11 **binary release** as an
+x86_64 host compiler, with pinned Python 3.10 dependencies. The target runtime,
+instruction generator and sample executables are built from source. The model
+derivations compile and calibrate pinned Caffe/ONNX weights and 100-image vendor
+datasets, and run the compiler's reference comparisons. Only model artifacts,
+images and compact reference tensors belong on the board; compiler dependencies
+stay on the build host. Both model derivations passed a byte-identical Nix rebuild. Recipes follow the official
+[MobileNet](https://milkv.io/docs/duo/application-development/tpu/tpu-mobilenetv2)
+and [YOLOv5](https://milkv.io/docs/duo/application-development/tpu/tpu-yolov5)
+tutorials, using YOLOv5n to fit the board's memory.
+
+On the same RAM-booted Linux 7.2.8 board, the Nix-installed model checker passed
+100 MobileNet and 20 YOLOv5n inferences. Every FP32 value matched CModel exactly:
+1,000 classification values and 2,142,000 detection values, with zero maximum
+absolute error. IRQ 76 increased by exactly 120. MobileNet averaged 9.76 ms wall /
+3.79 ms process CPU per forward; YOLOv5n averaged 194.27 / 167.85 ms. These forward
+measurements include runtime data copies and output conversion, and exclude JPEG
+decoding, NMS and drawing. The detector's FP32 output conversion is substantial CPU
+work; these numbers are not TPU-only latency.
+
+The JPEG examples identified the cat as Egyptian cat and drew dog/car boxes on
+`dog.jpg`. Concurrent classifier, detector and matrix workloads also passed.
+Injecting a failed submission made `CVI_NN_Forward` and the sample fail, with no
+result image and no hardware interrupt.

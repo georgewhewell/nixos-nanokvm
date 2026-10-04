@@ -503,11 +503,28 @@ in
     bootCommand = "picoclaw_splash; fastboot usb 0";
   };
 
+  sg2002-tpu-mlir = (import ./sg2002/tpu/vendor/compiler.nix).compiler;
+  sg2002-tpu-mobilenet-v2 = (import ./sg2002/tpu/vendor/models.nix).mobileNet;
+  sg2002-tpu-yolov5n = (import ./sg2002/tpu/vendor/models.nix).yolo;
+
   # CV181x instruction generation on the build host and on the SG2002.
   sg2002-cvikernel = cross.callPackage ./sg2002/tpu/cvikernel.nix { };
   sg2002-cvikernel-host = final.buildPackages.callPackage ./sg2002/tpu/cvikernel.nix { };
   sg2002-tpu = cross.callPackage ./sg2002/tpu {
     sophgo-cvikernel = final.sg2002-cvikernel;
+  };
+
+  sg2002-cvibuilder = final.buildPackages.callPackage ./sg2002/tpu/vendor/cvibuilder.nix { };
+  sg2002-cviruntime = cross.callPackage ./sg2002/tpu/vendor/runtime.nix {
+    # FlatBuffers is header-only here; flatc and generated headers run on the host.
+    flatbuffers = final.buildPackages.flatbuffers;
+    sophgo-cvikernel = final.sg2002-cvikernel;
+    sophgo-cvibuilder = final.sg2002-cvibuilder;
+    sg2002-tpu = final.sg2002-tpu;
+  };
+
+  sg2002-tpu-examples = cross.callPackage ./sg2002/tpu/vendor/examples.nix {
+    sophgo-cviruntime = final.sg2002-cviruntime;
   };
 
   # Normal nixpkgs kernel + SG2002 patches + structured deltas (see
