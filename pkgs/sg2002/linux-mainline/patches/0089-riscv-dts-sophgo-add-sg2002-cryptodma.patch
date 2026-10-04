@@ -1,0 +1,23 @@
+From: George Whewell <georgerw@gmail.com>
+Subject: [PATCH] riscv: dts: sophgo: describe SG2002 CryptoDMA
+
+Use the documented master C906 interrupt and shared security clocks.
+
+diff --git a/arch/riscv/boot/dts/sophgo/sg2002.dtsi b/arch/riscv/boot/dts/sophgo/sg2002.dtsi
+--- a/arch/riscv/boot/dts/sophgo/sg2002.dtsi
++++ b/arch/riscv/boot/dts/sophgo/sg2002.dtsi
+@@ -22,6 +22,14 @@
+ 	soc {
+ 		interrupt-parent = <&plic>;
+ 		dma-noncoherent;
++
++		crypto: crypto@2060000 {
++			compatible = "sophgo,sg2002-crypto";
++			reg = <0x02060000 0x1000>;
++			interrupts = <SOC_PERIPHERAL_IRQ(75) IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&clk CLK_EFUSE>, <&clk CLK_APB_EFUSE>;
++			clock-names = "core", "apb";
++		};
+ 
+ 		pinctrl: pinctrl@3001000 {
+ 			compatible = "sophgo,sg2002-pinctrl";

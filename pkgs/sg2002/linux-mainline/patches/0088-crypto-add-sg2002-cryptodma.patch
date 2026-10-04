@@ -1,0 +1,1033 @@
+From: George Whewell <georgerw@gmail.com>
+Subject: [PATCH] crypto: add SG2002 CryptoDMA
+
+Use the documented master C906 interrupt and shared security clocks.
+
+diff --git a/Documentation/devicetree/bindings/crypto/sophgo,sg2002-crypto.yaml b/Documentation/devicetree/bindings/crypto/sophgo,sg2002-crypto.yaml
+new file mode 100644
+--- /dev/null
++++ b/Documentation/devicetree/bindings/crypto/sophgo,sg2002-crypto.yaml
+@@ -0,0 +1,55 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/crypto/sophgo,sg2002-crypto.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Sophgo SG2002 CryptoDMA
++
++maintainers:
++  - George Whewell <georgerw@gmail.com>
++
++description: |
++  The SG2002 symmetric cipher and SHA accelerator has a private descriptor
++  DMA engine. Its clocks are shared with the security subsystem and eFuse.
++  Only one processor may own the accelerator at a time.
++
++properties:
++  compatible:
++    const: sophgo,sg2002-crypto
++
++  reg:
++    maxItems: 1
++
++  interrupts:
++    maxItems: 1
++
++  clocks:
++    maxItems: 2
++
++  clock-names:
++    items:
++      - const: core
++      - const: apb
++
++required:
++  - compatible
++  - reg
++  - interrupts
++  - clocks
++  - clock-names
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/clock/sophgo,cv1800.h>
++    #include <dt-bindings/interrupt-controller/irq.h>
++
++    crypto@2060000 {
++        compatible = "sophgo,sg2002-crypto";
++        reg = <0x02060000 0x1000>;
++        interrupts = <91 IRQ_TYPE_LEVEL_HIGH>;
++        clocks = <&clk CLK_EFUSE>, <&clk CLK_APB_EFUSE>;
++        clock-names = "core", "apb";
++    };
+diff --git a/Documentation/crypto/sg2002.rst b/Documentation/crypto/sg2002.rst
+new file mode 100644
+--- /dev/null
++++ b/Documentation/crypto/sg2002.rst
+@@ -0,0 +1,49 @@
++SG2002 CryptoDMA
++===============
++
++The driver registers asynchronous, kernel-only skcipher implementations of
++ECB/CBC/CTR for AES (128/192/256-bit keys), SM4, DES and three-key 3DES, and
++ahash implementations of SHA-1/SHA-256. Hashes support incremental updates,
++finalization and state export/import. CTR accepts partial final blocks.
++It does not provide authentication, asymmetric keys or a userspace ABI.
++DES, 3DES and SHA-1 are compatibility algorithms, not new protocol choices.
++
++Linux owns the engine exclusively. Its completion interrupt is input 91
++on the master C906 PLIC; the vendor table's input 59 belongs to the slave
++C906 interrupt controller. Firmware on that processor must not access the
++engine concurrently.
++
++Requests share one crypto_engine queue and a 16 KiB coherent bounce buffer.
++Caller scatterlists are copied, never submitted directly to DMA. The DMA
++API handles the noncoherent C906; no physical-address or cache assumptions
++are made. This bounds memory use and contains late DMA writes. The TRM
++does not document a DMA drain acknowledgement or a safe busy-engine reset.
++On timeout the driver fails subsequent work and retains its DMA arena
++until reboot, including the outstanding descriptor. Clocks stay enabled
++and the module stays pinned. Unbind or shutdown of this failed instance
++requires a whole-system reset: neither driver rebind nor kexec can safely
++reuse its memory. Completed requests erase their buffer and descriptor
++keys. No recovery is attempted by resetting the shared security block.
++
++Enable EXPERT, CRYPTO_SELFTESTS and CRYPTO_SELFTESTS_FULL in test kernels
++for the standard Crypto API vectors and differential fuzzing at algorithm
++registration. Normal images do not enable EXPERT just for this driver.
++Throughput and application benefits require measurement; applications
++using their own crypto libraries do not automatically use this engine.
++
++References
++----------
++
++Descriptor layout, AES key encodings, cipher modes and SHA state handling
++follow the GPL-2.0 CVITEK ``cvitek-spacc`` driver (Copyright 2022-2023
++CVITEK), including the implementation maintained by OneKVM:
++
++* https://github.com/sophgo/osdrv/tree/cf72871a16133629e863bf9e43192210af6915aa/interdrv
++* https://github.com/onekvm/linux-sg2002-cryptodma/tree/e16ca2e
++* https://github.com/sophgo/sophgo-doc/blob/6da1ee8cad3ab730401cc8f775d690c57017f433/SG200X/TRM/contents/en/security/cryptodma.rst
++* https://github.com/sophgo/sophgo-doc/blob/6da1ee8cad3ab730401cc8f775d690c57017f433/SG200X/TRM/contents/cn/system-architecture/interrupts.table.rst
++
++The register table and vendor implementation both specify AES-192 even
++though the TRM's abbreviated feature list omits it. The vendor SHA-256
++selector is bit 1 of descriptor word 1; the TRM conflates that field with
++the AES key-size field. Key/IV selection also follows the vendor code.
+diff --git a/drivers/crypto/Kconfig b/drivers/crypto/Kconfig
+--- a/drivers/crypto/Kconfig
++++ b/drivers/crypto/Kconfig
+@@ -10,6 +10,19 @@
+ 	  If you say N, all options in this submenu will be skipped and disabled.
+ 
+ if CRYPTO_HW
++
++config CRYPTO_DEV_SG2002
++	tristate "Sophgo SG2002 CryptoDMA"
++	depends on OF && HAS_DMA
++	depends on ARCH_SOPHGO || COMPILE_TEST
++	select CRYPTO_ENGINE
++	select CRYPTO_SKCIPHER
++	select CRYPTO_HASH
++	select CRYPTO_LIB_DES
++	help
++	  Support the SG2002 AES, SM4, DES/3DES and SHA-1/SHA-256
++	  accelerator through the kernel Crypto API. The module is
++	  called sg2002-crypto.
+ 
+ source "drivers/crypto/allwinner/Kconfig"
+ 
+diff --git a/drivers/crypto/Makefile b/drivers/crypto/Makefile
+--- a/drivers/crypto/Makefile
++++ b/drivers/crypto/Makefile
+@@ -47,3 +47,4 @@
+ obj-y += starfive/
+ obj-y += cavium/
+ obj-y += ti/
++obj-$(CONFIG_CRYPTO_DEV_SG2002) += sg2002-crypto.o
+diff --git a/drivers/crypto/sg2002-crypto.c b/drivers/crypto/sg2002-crypto.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/crypto/sg2002-crypto.c
+@@ -0,0 +1,878 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Sophgo SG2002 CryptoDMA.
++ *
++ * Descriptor programming follows CVITEK's GPL-2.0 cvitek-spacc driver
++ * (Copyright 2022-2023 CVITEK), also maintained by the OneKVM project.
++ * The Crypto API integration and DMA ownership are independent of its
++ * vendor ioctl interface. See Documentation/crypto/sg2002.rst for sources.
++ */
++#include <crypto/aes.h>
++#include <crypto/engine.h>
++#include <crypto/internal/des.h>
++#include <crypto/internal/hash.h>
++#include <crypto/internal/skcipher.h>
++#include <crypto/scatterwalk.h>
++#include <crypto/sha1.h>
++#include <crypto/sha2.h>
++#include <crypto/sm4.h>
++#include <linux/clk.h>
++#include <linux/completion.h>
++#include <linux/dma-mapping.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/reboot.h>
++#include <linux/unaligned.h>
++
++#define SG_DMA_CTRL		0x000
++#define SG_INT_MASK		0x004
++#define SG_DESC_LO		0x008
++#define SG_DESC_HI		0x00c
++#define SG_INT_RAW		0x010
++#define SG_SHA_STATE		0x1c0
++#define SG_INT_CIPHER		BIT(0)
++#define SG_INT_HASH		BIT(1)
++#define SG_INT_ALL		(SG_INT_CIPHER | SG_INT_HASH)
++#define SG_DMA_START		((6 << 24) | (16 << 16) | BIT(1) | BIT(0))
++#define SG_DESC_AES		BIT(9)
++#define SG_DESC_DES		BIT(10)
++#define SG_DESC_SM4		BIT(11)
++#define SG_DESC_SHA		BIT(12)
++#define SG_DESC_KEY		BIT(19)
++#define SG_DESC_IV		BIT(23)
++#define SG_MODE_ECB		0
++#define SG_MODE_CBC		BIT(1)
++#define SG_MODE_CTR		BIT(2)
++#define SG_ENCRYPT		BIT(0)
++#define SG_KEY_128		BIT(5)
++#define SG_KEY_192		BIT(4)
++#define SG_KEY_256		BIT(3)
++#define SG_TDES			BIT(3)
++/* The vendor SHA descriptor uses bit 1, not the TRM's AES key field. */
++#define SG_SHA256		BIT(1)
++#define SG_DATA_OFFSET		128
++#define SG_DATA_SIZE		SZ_16K
++#define SG_ARENA_SIZE		(SG_DATA_OFFSET + SG_DATA_SIZE)
++#define SG_TIMEOUT_MS		1000
++
++struct sg_crypto_dev {
++	struct device *dev;
++	void __iomem *regs;
++	struct clk_bulk_data clocks[2];
++	struct crypto_engine *engine;
++	struct sg_cipher_alg *ciphers[12];
++	struct ahash_engine_alg *hashes[2];
++	void *arena;
++	dma_addr_t dma;
++	unsigned int used;
++	struct completion done;
++	spinlock_t irq_lock;
++	u32 expected;
++	bool completed;
++	bool poisoned;
++	bool stopping;
++	int irq;
++	atomic_t pending;
++	wait_queue_head_t idle;
++};
++
++/* SG2002 has one engine. The lock also excludes enqueue during removal. */
++static DEFINE_SPINLOCK(sg_device_lock);
++static DEFINE_MUTEX(sg_probe_lock);
++static struct sg_crypto_dev *sg_device;
++static bool sg_failed;
++
++struct sg_cipher_alg {
++	u32 selector;
++	u32 mode;
++	unsigned int blocksize;
++	struct skcipher_engine_alg alg;
++};
++
++struct sg_cipher_ctx {
++	u8 key[AES_MAX_KEY_SIZE];
++	unsigned int keylen;
++	u32 keymode;
++	const struct sg_cipher_alg *alg;
++};
++
++struct sg_cipher_req {
++	struct sg_crypto_dev *dd;
++	bool encrypt;
++};
++
++/* No pointers or hardware ownership in exported hash state. */
++struct sg_hash_state {
++	u64 count;
++	u32 words[SHA256_DIGEST_SIZE / sizeof(u32)];
++	u8 buffer[SHA256_BLOCK_SIZE];
++};
++
++struct sg_hash_req {
++	struct sg_hash_state state;
++	struct sg_crypto_dev *dd;
++	unsigned int nbytes;
++	bool final;
++	int error;
++};
++
++static irqreturn_t sg_irq(int irq, void *data)
++{
++	struct sg_crypto_dev *dd = data;
++	unsigned long flags;
++	u32 status;
++
++	spin_lock_irqsave(&dd->irq_lock, flags);
++	status = readl(dd->regs + SG_INT_RAW) & SG_INT_ALL;
++	if (status) {
++		writel(status, dd->regs + SG_INT_RAW);
++		if (status & dd->expected) {
++			dd->completed = true;
++			complete(&dd->done);
++		}
++	}
++	spin_unlock_irqrestore(&dd->irq_lock, flags);
++	return status ? IRQ_HANDLED : IRQ_NONE;
++}
++
++/* Called only by the single crypto-engine worker. */
++static int sg_run(struct sg_crypto_dev *dd, unsigned int len, u32 interrupt)
++{
++	__le32 *desc = dd->arena;
++	dma_addr_t data = dd->dma + SG_DATA_OFFSET;
++	unsigned long flags;
++	int err = 0;
++
++	if (READ_ONCE(dd->stopping))
++		return -ESHUTDOWN;
++	if (dd->poisoned)
++		return -EIO;
++
++	desc[4] = cpu_to_le32(lower_32_bits(data));
++	desc[5] = cpu_to_le32(upper_32_bits(data));
++	desc[6] = desc[4];
++	desc[7] = desc[5];
++	desc[8] = cpu_to_le32(len);
++
++	spin_lock_irqsave(&dd->irq_lock, flags);
++	writel(0, dd->regs + SG_INT_MASK);
++	writel(SG_INT_ALL, dd->regs + SG_INT_RAW);
++	reinit_completion(&dd->done);
++	dd->completed = false;
++	dd->expected = interrupt;
++	writel(lower_32_bits(dd->dma), dd->regs + SG_DESC_LO);
++	writel(upper_32_bits(dd->dma), dd->regs + SG_DESC_HI);
++	writel(interrupt, dd->regs + SG_INT_MASK);
++	dma_wmb();
++	writel(SG_DMA_START, dd->regs + SG_DMA_CTRL);
++	spin_unlock_irqrestore(&dd->irq_lock, flags);
++
++	wait_for_completion_timeout(&dd->done, msecs_to_jiffies(SG_TIMEOUT_MS));
++
++	spin_lock_irqsave(&dd->irq_lock, flags);
++	writel(0, dd->regs + SG_INT_MASK);
++	/* Account for an interrupt pending at the timeout boundary. */
++	if (!dd->completed && !(readl(dd->regs + SG_INT_RAW) & interrupt)) {
++		/*
++		 * No documented idle/drain acknowledgement exists. Clearing enable
++		 * is NOT proof that outstanding bus writes have stopped. Fail this
++		 * instance and retain the entire coherent arena until reboot.
++		 * Never erase its descriptor or reuse its memory after a timeout.
++		 */
++		dd->poisoned = true;
++		WRITE_ONCE(sg_failed, true);
++		/* Preserve fail-stop across module unload as well as rebind. */
++		__module_get(THIS_MODULE);
++		err = -ETIMEDOUT;
++	}
++	dd->expected = 0;
++	writel(0, dd->regs + SG_DMA_CTRL);
++	writel(SG_INT_ALL, dd->regs + SG_INT_RAW);
++	spin_unlock_irqrestore(&dd->irq_lock, flags);
++	if (err)
++		dev_err(dd->dev, "DMA timeout: engine disabled; DMA arena retained until reboot\n");
++	else
++		dma_rmb();
++	return err;
++}
++
++static void sg_erase(struct sg_crypto_dev *dd)
++{
++	if (!dd->poisoned) {
++		memzero_explicit(dd->arena, SG_DATA_OFFSET + dd->used);
++		dd->used = 0;
++	}
++}
++
++static void sg_put_request(struct sg_crypto_dev *dd)
++{
++	if (atomic_dec_and_test(&dd->pending))
++		wake_up(&dd->idle);
++}
++
++static int sg_cipher_init(struct crypto_skcipher *tfm)
++{
++	struct sg_cipher_ctx *ctx = crypto_skcipher_ctx(tfm);
++
++	ctx->alg = container_of(crypto_skcipher_alg(tfm),
++			       struct sg_cipher_alg, alg.base);
++	crypto_skcipher_set_reqsize(tfm, sizeof(struct sg_cipher_req));
++	return 0;
++}
++
++static void sg_cipher_exit(struct crypto_skcipher *tfm)
++{
++	memzero_explicit(crypto_skcipher_ctx(tfm), sizeof(struct sg_cipher_ctx));
++}
++
++static int sg_setkey(struct crypto_skcipher *tfm, const u8 *key,
++		     unsigned int keylen)
++{
++	struct sg_cipher_ctx *ctx = crypto_skcipher_ctx(tfm);
++	u32 keymode = 0;
++	int err = -EINVAL;
++
++	memzero_explicit(ctx->key, sizeof(ctx->key));
++	ctx->keylen = 0;
++	switch (ctx->alg->selector) {
++	case SG_DESC_AES:
++		switch (keylen) {
++		case AES_KEYSIZE_128:
++			keymode = SG_KEY_128;
++			break;
++		case AES_KEYSIZE_192:
++			keymode = SG_KEY_192;
++			break;
++		case AES_KEYSIZE_256:
++			keymode = SG_KEY_256;
++			break;
++		default:
++			return -EINVAL;
++		}
++		break;
++	case SG_DESC_SM4:
++		if (keylen != SM4_KEY_SIZE)
++			return -EINVAL;
++		keymode = SG_KEY_128;
++		break;
++	case SG_DESC_DES:
++		if (keylen == DES_KEY_SIZE)
++			err = verify_skcipher_des_key(tfm, key);
++		else if (keylen == DES3_EDE_KEY_SIZE) {
++			err = verify_skcipher_des3_key(tfm, key);
++			keymode = SG_TDES;
++		}
++		if (err)
++			return err;
++		break;
++	default:
++		return -EINVAL;
++	}
++	memcpy(ctx->key, key, keylen);
++	ctx->keylen = keylen;
++	ctx->keymode = keymode;
++	return 0;
++}
++
++static void sg_add_counter(u8 *iv, unsigned int len, unsigned int blocks)
++{
++	while (len && blocks) {
++		blocks += iv[--len];
++		iv[len] = blocks;
++		blocks >>= 8;
++	}
++}
++
++static int sg_cipher_process(struct skcipher_request *req)
++{
++	struct sg_cipher_req *rctx = skcipher_request_ctx(req);
++	struct sg_cipher_ctx *ctx = crypto_skcipher_ctx(crypto_skcipher_reqtfm(req));
++	struct sg_crypto_dev *dd = rctx->dd;
++	const struct sg_cipher_alg *alg = ctx->alg;
++	unsigned int bs = alg->blocksize, offset = 0, len, padded;
++	__le32 *desc = dd->arena;
++	u8 *data = dd->arena + SG_DATA_OFFSET;
++	u8 iv[AES_BLOCK_SIZE] = {}, next_iv[AES_BLOCK_SIZE] = {};
++	int err = 0;
++
++	if (alg->mode)
++		memcpy(iv, req->iv, bs);
++	while (offset < req->cryptlen) {
++		len = min_t(unsigned int, req->cryptlen - offset, SG_DATA_SIZE);
++		padded = round_up(len, bs);
++		dd->used = max(dd->used, padded);
++		memset(desc, 0, SG_DATA_OFFSET);
++		desc[0] = cpu_to_le32(SG_DESC_KEY | alg->selector | 0xf |
++				     (alg->mode ? SG_DESC_IV : 0));
++		desc[1] = cpu_to_le32(ctx->keymode | alg->mode |
++				     ((rctx->encrypt || alg->mode == SG_MODE_CTR) ?
++				      SG_ENCRYPT : 0));
++		memcpy(&desc[10], ctx->key, ctx->keylen);
++		memcpy(&desc[18], iv, bs);
++		scatterwalk_map_and_copy(data, req->src, offset, len, 0);
++		memset(data + len, 0, padded - len);
++		if (alg->mode == SG_MODE_CBC && !rctx->encrypt)
++			memcpy(next_iv, data + len - bs, bs);
++		err = sg_run(dd, padded, SG_INT_CIPHER);
++		if (err)
++			break;
++		if (alg->mode == SG_MODE_CBC) {
++			if (rctx->encrypt)
++				memcpy(iv, data + len - bs, bs);
++			else
++				memcpy(iv, next_iv, bs);
++		} else if (alg->mode == SG_MODE_CTR) {
++			sg_add_counter(iv, bs, padded / bs);
++		}
++		scatterwalk_map_and_copy(data, req->dst, offset, len, 1);
++		offset += len;
++	}
++	if (!err && alg->mode)
++		memcpy(req->iv, iv, bs);
++	memzero_explicit(iv, sizeof(iv));
++	memzero_explicit(next_iv, sizeof(next_iv));
++	return err;
++}
++
++static int sg_cipher_do_one(struct crypto_engine *engine, void *areq)
++{
++	struct skcipher_request *req = container_of(areq, struct skcipher_request, base);
++	struct sg_cipher_req *rctx = skcipher_request_ctx(req);
++	struct sg_crypto_dev *dd = rctx->dd;
++	int err;
++
++	/* A timed-out descriptor must never be overwritten by another request. */
++	err = dd->poisoned ? -EIO : sg_cipher_process(req);
++	sg_erase(dd);
++	local_bh_disable();
++	crypto_finalize_skcipher_request(engine, req, err);
++	local_bh_enable();
++	sg_put_request(dd);
++	return 0;
++}
++
++static int sg_cipher_enqueue(struct skcipher_request *req, bool encrypt)
++{
++	struct sg_cipher_req *rctx = skcipher_request_ctx(req);
++	struct sg_cipher_ctx *ctx = crypto_skcipher_ctx(crypto_skcipher_reqtfm(req));
++	struct sg_crypto_dev *dd;
++	unsigned long flags;
++	int err;
++
++	if (!ctx->keylen)
++		return -ENOKEY;
++	if (ctx->alg->mode != SG_MODE_CTR && req->cryptlen % ctx->alg->blocksize)
++		return -EINVAL;
++	if (!req->cryptlen)
++		return 0;
++	if (sg_nents_for_len(req->src, req->cryptlen) < 0 ||
++	    sg_nents_for_len(req->dst, req->cryptlen) < 0)
++		return -EINVAL;
++
++	rctx->encrypt = encrypt;
++	spin_lock_irqsave(&sg_device_lock, flags);
++	dd = sg_device;
++	if (!dd) {
++		err = -ENODEV;
++		goto out;
++	}
++	rctx->dd = dd;
++	atomic_inc(&dd->pending);
++	err = crypto_transfer_skcipher_request_to_engine(dd->engine, req);
++	if (err != -EINPROGRESS &&
++	    !(err == -EBUSY && req->base.flags & CRYPTO_TFM_REQ_MAY_BACKLOG))
++		sg_put_request(dd);
++ out:
++	spin_unlock_irqrestore(&sg_device_lock, flags);
++	return err;
++}
++
++static int sg_encrypt(struct skcipher_request *req)
++{
++	return sg_cipher_enqueue(req, true);
++}
++
++static int sg_decrypt(struct skcipher_request *req)
++{
++	return sg_cipher_enqueue(req, false);
++}
++
++static int sg_hash_init(struct ahash_request *req)
++{
++	struct sg_hash_req *rctx = ahash_request_ctx(req);
++	unsigned int digestsize = crypto_ahash_digestsize(crypto_ahash_reqtfm(req));
++	static const u32 sha1[] = {
++		SHA1_H0, SHA1_H1, SHA1_H2, SHA1_H3, SHA1_H4,
++	};
++	static const u32 sha256[] = {
++		SHA256_H0, SHA256_H1, SHA256_H2, SHA256_H3,
++		SHA256_H4, SHA256_H5, SHA256_H6, SHA256_H7,
++	};
++	const u32 *initial = digestsize == SHA1_DIGEST_SIZE ? sha1 : sha256;
++	int i;
++
++	memset(rctx, 0, sizeof(*rctx));
++	for (i = 0; i < digestsize / sizeof(u32); i++)
++		rctx->state.words[i] = cpu_to_be32(initial[i]);
++	return 0;
++}
++
++static int sg_hash_blocks(struct sg_crypto_dev *dd, struct sg_hash_state *state,
++			  unsigned int len, unsigned int digestsize)
++{
++	__le32 *desc = dd->arena;
++	int i, err;
++
++	memset(desc, 0, SG_DATA_OFFSET);
++	desc[0] = cpu_to_le32(SG_DESC_KEY | SG_DESC_SHA | 0xf);
++	desc[1] = cpu_to_le32(BIT(0) |
++			     (digestsize == SHA256_DIGEST_SIZE ? SG_SHA256 : 0));
++	memcpy(&desc[10], state->words, digestsize);
++	err = sg_run(dd, len, SG_INT_HASH);
++	if (err)
++		return err;
++	for (i = 0; i < digestsize / sizeof(u32); i++)
++		state->words[i] = readl(dd->regs + SG_SHA_STATE + i * sizeof(u32));
++	return 0;
++}
++
++static int sg_hash_process(struct ahash_request *req)
++{
++	struct sg_hash_req *rctx = ahash_request_ctx(req);
++	struct sg_hash_state *state = &rctx->state;
++	struct sg_crypto_dev *dd = rctx->dd;
++	unsigned int digestsize = crypto_ahash_digestsize(crypto_ahash_reqtfm(req));
++	unsigned int used = state->count % SHA256_BLOCK_SIZE;
++	unsigned int offset = 0, len, blocks;
++	u8 *data = dd->arena + SG_DATA_OFFSET;
++	int err;
++
++	dd->used = used;
++	memcpy(data, state->buffer, used);
++	while (offset < rctx->nbytes) {
++		len = min_t(unsigned int, rctx->nbytes - offset, SG_DATA_SIZE - used);
++		scatterwalk_map_and_copy(data + used, req->src, offset, len, 0);
++		offset += len;
++		state->count += len;
++		used += len;
++		dd->used = max(dd->used, used);
++		blocks = round_down(used, SHA256_BLOCK_SIZE);
++		if (blocks) {
++			err = sg_hash_blocks(dd, state, blocks, digestsize);
++			if (err)
++				return err;
++			used -= blocks;
++			memmove(data, data + blocks, used);
++		}
++	}
++	memzero_explicit(state->buffer, sizeof(state->buffer));
++	memcpy(state->buffer, data, used);
++	if (!rctx->final)
++		return 0;
++
++	/* Hardware consumes complete SHA compression blocks, including padding. */
++	len = used < SHA256_BLOCK_SIZE - sizeof(u64) ? SHA256_BLOCK_SIZE :
++		2 * SHA256_BLOCK_SIZE;
++	dd->used = max(dd->used, len);
++	memset(data + used, 0, len - used);
++	data[used] = 0x80;
++	put_unaligned_be64(state->count << 3, data + len - sizeof(u64));
++	err = sg_hash_blocks(dd, state, len, digestsize);
++	if (!err) {
++		memcpy(req->result, state->words, digestsize);
++		memzero_explicit(state, sizeof(*state));
++	}
++	return err;
++}
++
++static int sg_hash_do_one(struct crypto_engine *engine, void *areq)
++{
++	struct ahash_request *req = container_of(areq, struct ahash_request, base);
++	struct sg_hash_req *rctx = ahash_request_ctx(req);
++	struct sg_crypto_dev *dd = rctx->dd;
++	int err;
++
++	err = dd->poisoned ? -EIO : sg_hash_process(req);
++	rctx->error = err;
++	sg_erase(dd);
++	local_bh_disable();
++	crypto_finalize_hash_request(engine, req, err);
++	local_bh_enable();
++	sg_put_request(dd);
++	return 0;
++}
++
++static int sg_hash_enqueue(struct ahash_request *req, unsigned int nbytes, bool final)
++{
++	struct sg_hash_req *rctx = ahash_request_ctx(req);
++	struct sg_crypto_dev *dd;
++	unsigned long flags;
++	int err;
++
++	if (rctx->error)
++		return rctx->error;
++	if (!final && !nbytes)
++		return 0;
++	if (nbytes && sg_nents_for_len(req->src, nbytes) < 0)
++		return -EINVAL;
++	rctx->nbytes = nbytes;
++	rctx->final = final;
++	spin_lock_irqsave(&sg_device_lock, flags);
++	dd = sg_device;
++	if (!dd) {
++		err = -ENODEV;
++		goto out;
++	}
++	rctx->dd = dd;
++	atomic_inc(&dd->pending);
++	err = crypto_transfer_hash_request_to_engine(dd->engine, req);
++	if (err != -EINPROGRESS &&
++	    !(err == -EBUSY && req->base.flags & CRYPTO_TFM_REQ_MAY_BACKLOG))
++		sg_put_request(dd);
++ out:
++	spin_unlock_irqrestore(&sg_device_lock, flags);
++	return err;
++}
++
++static int sg_hash_update(struct ahash_request *req)
++{
++	return sg_hash_enqueue(req, req->nbytes, false);
++}
++
++static int sg_hash_final(struct ahash_request *req)
++{
++	return sg_hash_enqueue(req, 0, true);
++}
++
++static int sg_hash_finup(struct ahash_request *req)
++{
++	return sg_hash_enqueue(req, req->nbytes, true);
++}
++
++static int sg_hash_digest(struct ahash_request *req)
++{
++	sg_hash_init(req);
++	return sg_hash_finup(req);
++}
++
++static int sg_hash_export(struct ahash_request *req, void *out)
++{
++	struct sg_hash_req *rctx = ahash_request_ctx(req);
++
++	if (rctx->error)
++		return rctx->error;
++	memcpy(out, &rctx->state, sizeof(rctx->state));
++	return 0;
++}
++
++static int sg_hash_import(struct ahash_request *req, const void *in)
++{
++	struct sg_hash_req *rctx = ahash_request_ctx(req);
++
++	memset(rctx, 0, sizeof(*rctx));
++	memcpy(&rctx->state, in, sizeof(rctx->state));
++	return 0;
++}
++
++static int sg_hash_tfm_init(struct crypto_ahash *tfm)
++{
++	crypto_ahash_set_reqsize(tfm, sizeof(struct sg_hash_req));
++	return 0;
++}
++
++#define SG_FLAGS (CRYPTO_ALG_ASYNC | CRYPTO_ALG_KERN_DRIVER_ONLY)
++#define SG_CIPHER(_name, _driver, _selector, _mode, _bs, _min, _max) { \
++	.selector = _selector, .mode = _mode, .blocksize = _bs, \
++	.alg = { .base = { \
++		.base = { \
++			.cra_name = _name, .cra_driver_name = _driver "-sg2002", \
++			.cra_priority = 200, .cra_flags = SG_FLAGS, \
++			.cra_blocksize = (_mode == SG_MODE_CTR ? 1 : _bs), \
++			.cra_ctxsize = sizeof(struct sg_cipher_ctx), \
++			.cra_module = THIS_MODULE, \
++		}, \
++		.min_keysize = _min, .max_keysize = _max, \
++		.ivsize = (_mode ? _bs : 0), .chunksize = _bs, \
++		.setkey = sg_setkey, .encrypt = sg_encrypt, .decrypt = sg_decrypt, \
++		.init = sg_cipher_init, .exit = sg_cipher_exit, \
++	}, .op.do_one_request = sg_cipher_do_one }, \
++}
++static const struct sg_cipher_alg sg_ciphers[] = {
++	SG_CIPHER("ecb(aes)", "ecb-aes", SG_DESC_AES,
++		  SG_MODE_ECB, AES_BLOCK_SIZE, AES_MIN_KEY_SIZE, AES_MAX_KEY_SIZE),
++	SG_CIPHER("cbc(aes)", "cbc-aes", SG_DESC_AES,
++		  SG_MODE_CBC, AES_BLOCK_SIZE, AES_MIN_KEY_SIZE, AES_MAX_KEY_SIZE),
++	SG_CIPHER("ctr(aes)", "ctr-aes", SG_DESC_AES,
++		  SG_MODE_CTR, AES_BLOCK_SIZE, AES_MIN_KEY_SIZE, AES_MAX_KEY_SIZE),
++	SG_CIPHER("ecb(sm4)", "ecb-sm4", SG_DESC_SM4,
++		  SG_MODE_ECB, SM4_BLOCK_SIZE, SM4_KEY_SIZE, SM4_KEY_SIZE),
++	SG_CIPHER("cbc(sm4)", "cbc-sm4", SG_DESC_SM4,
++		  SG_MODE_CBC, SM4_BLOCK_SIZE, SM4_KEY_SIZE, SM4_KEY_SIZE),
++	SG_CIPHER("ctr(sm4)", "ctr-sm4", SG_DESC_SM4,
++		  SG_MODE_CTR, SM4_BLOCK_SIZE, SM4_KEY_SIZE, SM4_KEY_SIZE),
++	SG_CIPHER("ecb(des)", "ecb-des", SG_DESC_DES,
++		  SG_MODE_ECB, DES_BLOCK_SIZE, DES_KEY_SIZE, DES_KEY_SIZE),
++	SG_CIPHER("cbc(des)", "cbc-des", SG_DESC_DES,
++		  SG_MODE_CBC, DES_BLOCK_SIZE, DES_KEY_SIZE, DES_KEY_SIZE),
++	SG_CIPHER("ctr(des)", "ctr-des", SG_DESC_DES,
++		  SG_MODE_CTR, DES_BLOCK_SIZE, DES_KEY_SIZE, DES_KEY_SIZE),
++	SG_CIPHER("ecb(des3_ede)", "ecb-des3_ede", SG_DESC_DES,
++		  SG_MODE_ECB, DES_BLOCK_SIZE, DES3_EDE_KEY_SIZE, DES3_EDE_KEY_SIZE),
++	SG_CIPHER("cbc(des3_ede)", "cbc-des3_ede", SG_DESC_DES,
++		  SG_MODE_CBC, DES_BLOCK_SIZE, DES3_EDE_KEY_SIZE, DES3_EDE_KEY_SIZE),
++	SG_CIPHER("ctr(des3_ede)", "ctr-des3_ede", SG_DESC_DES,
++		  SG_MODE_CTR, DES_BLOCK_SIZE, DES3_EDE_KEY_SIZE, DES3_EDE_KEY_SIZE),
++};
++
++#define SG_HASH(_name, _digestsize) { \
++	.base = { \
++		.init = sg_hash_init, .update = sg_hash_update, \
++		.final = sg_hash_final, .finup = sg_hash_finup, .digest = sg_hash_digest, \
++		.export = sg_hash_export, .import = sg_hash_import, \
++		.init_tfm = sg_hash_tfm_init, \
++		.halg = { \
++			.digestsize = _digestsize, .statesize = sizeof(struct sg_hash_state), \
++			.base = { \
++				.cra_name = _name, .cra_driver_name = _name "-sg2002", \
++				.cra_priority = 200, .cra_flags = SG_FLAGS, \
++				.cra_blocksize = SHA256_BLOCK_SIZE, .cra_module = THIS_MODULE, \
++			}, \
++		}, \
++	}, .op.do_one_request = sg_hash_do_one, \
++}
++
++static const struct ahash_engine_alg sg_hashes[] = {
++	SG_HASH("sha1", SHA1_DIGEST_SIZE),
++	SG_HASH("sha256", SHA256_DIGEST_SIZE),
++};
++
++static void sg_cipher_destroy(struct crypto_alg *alg)
++{
++	kfree(container_of(alg, struct sg_cipher_alg, alg.base.base));
++}
++
++static void sg_hash_destroy(struct crypto_alg *alg)
++{
++	kfree(container_of(alg, struct ahash_engine_alg, base.halg.base));
++}
++
++static void sg_unregister(struct sg_crypto_dev *dd)
++{
++	int i;
++
++	for (i = ARRAY_SIZE(dd->hashes) - 1; i >= 0; i--)
++		if (dd->hashes[i])
++			crypto_engine_unregister_ahash(dd->hashes[i]);
++	for (i = ARRAY_SIZE(dd->ciphers) - 1; i >= 0; i--)
++		if (dd->ciphers[i])
++			crypto_engine_unregister_skcipher(&dd->ciphers[i]->alg);
++}
++
++static void sg_disconnect(struct sg_crypto_dev *dd)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&sg_device_lock, flags);
++	sg_device = NULL;
++	WRITE_ONCE(dd->stopping, true);
++	spin_unlock_irqrestore(&sg_device_lock, flags);
++	wait_event(dd->idle, !atomic_read(&dd->pending));
++	crypto_engine_exit(dd->engine);
++}
++
++static void __noreturn sg_require_reset(struct sg_crypto_dev *dd)
++{
++	/* Neither unbind nor kexec may reuse RAM reachable by undrained DMA. */
++	dev_emerg(dd->dev, "undrained CryptoDMA requires a system reset\n");
++	emergency_restart();
++	panic("CryptoDMA: system reset failed");
++}
++
++static void sg_release_dma(struct sg_crypto_dev *dd)
++{
++	writel(0, dd->regs + SG_INT_MASK);
++	devm_free_irq(dd->dev, dd->irq, dd);
++	if (dd->poisoned)
++		sg_require_reset(dd);
++	sg_erase(dd);
++	dma_free_coherent(dd->dev, SG_ARENA_SIZE, dd->arena, dd->dma);
++}
++
++static void sg_release_clocks(void *data)
++{
++	struct sg_crypto_dev *dd = data;
++
++	/* Do not gate an undrained bus master, or drop its clock references. */
++	if (dd->poisoned)
++		return;
++	clk_bulk_disable_unprepare(ARRAY_SIZE(dd->clocks), dd->clocks);
++	clk_bulk_put(ARRAY_SIZE(dd->clocks), dd->clocks);
++}
++
++static int sg_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct sg_crypto_dev *dd;
++	unsigned long flags;
++	int err, i;
++
++	mutex_lock(&sg_probe_lock);
++	if (sg_device || READ_ONCE(sg_failed)) {
++		err = -EBUSY;
++		goto unlock;
++	}
++	dd = devm_kzalloc(dev, sizeof(*dd), GFP_KERNEL);
++	if (!dd) {
++		err = -ENOMEM;
++		goto unlock;
++	}
++	dd->dev = dev;
++	dd->regs = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(dd->regs)) {
++		err = PTR_ERR(dd->regs);
++		goto unlock;
++	}
++	dd->clocks[0].id = "core";
++	dd->clocks[1].id = "apb";
++	err = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
++	if (err)
++		goto unlock;
++	dd->irq = platform_get_irq(pdev, 0);
++	if (dd->irq < 0) {
++		err = dd->irq;
++		goto unlock;
++	}
++	init_completion(&dd->done);
++	spin_lock_init(&dd->irq_lock);
++	init_waitqueue_head(&dd->idle);
++	atomic_set(&dd->pending, 0);
++	err = clk_bulk_get(dev, ARRAY_SIZE(dd->clocks), dd->clocks);
++	if (err)
++		goto unlock;
++	err = clk_bulk_prepare_enable(ARRAY_SIZE(dd->clocks), dd->clocks);
++	if (err) {
++		clk_bulk_put(ARRAY_SIZE(dd->clocks), dd->clocks);
++		goto unlock;
++	}
++	err = devm_add_action_or_reset(dev, sg_release_clocks, dd);
++	if (err)
++		goto unlock;
++	/* Do not take ownership from firmware while its DMA is enabled. */
++	if (readl(dd->regs + SG_DMA_CTRL) & BIT(0)) {
++		err = -EBUSY;
++		goto clocks;
++	}
++	writel(0, dd->regs + SG_INT_MASK);
++	writel(SG_INT_ALL, dd->regs + SG_INT_RAW);
++	err = devm_request_irq(dev, dd->irq, sg_irq, 0, dev_name(dev), dd);
++	if (err)
++		goto clocks;
++	dd->arena = dma_alloc_coherent(dev, SG_ARENA_SIZE, &dd->dma, GFP_KERNEL);
++	if (!dd->arena) {
++		err = -ENOMEM;
++		goto irq;
++	}
++	dd->engine = crypto_engine_alloc_init(dev, false);
++	if (!dd->engine) {
++		err = -ENOMEM;
++		goto dma;
++	}
++	err = crypto_engine_start(dd->engine);
++	if (err)
++		goto engine;
++	platform_set_drvdata(pdev, dd);
++	spin_lock_irqsave(&sg_device_lock, flags);
++	sg_device = dd;
++	spin_unlock_irqrestore(&sg_device_lock, flags);
++	/* Copies outlive unbind when a caller still owns a transform. */
++	for (i = 0; i < ARRAY_SIZE(sg_ciphers); i++) {
++		struct sg_cipher_alg *alg = kmemdup(&sg_ciphers[i], sizeof(*alg), GFP_KERNEL);
++
++		if (!alg) {
++			err = -ENOMEM;
++			goto algorithms;
++		}
++		err = crypto_engine_register_skcipher(&alg->alg);
++		if (err) {
++			kfree(alg);
++			goto algorithms;
++		}
++		alg->alg.base.base.cra_destroy = sg_cipher_destroy;
++		dd->ciphers[i] = alg;
++	}
++	for (i = 0; i < ARRAY_SIZE(sg_hashes); i++) {
++		struct ahash_engine_alg *alg = kmemdup(&sg_hashes[i], sizeof(*alg), GFP_KERNEL);
++
++		if (!alg) {
++			err = -ENOMEM;
++			goto algorithms;
++		}
++		err = crypto_engine_register_ahash(alg);
++		if (err) {
++			kfree(alg);
++			goto algorithms;
++		}
++		alg->base.halg.base.cra_destroy = sg_hash_destroy;
++		dd->hashes[i] = alg;
++	}
++	mutex_unlock(&sg_probe_lock);
++	return 0;
++
++ algorithms:
++	sg_disconnect(dd);
++	sg_unregister(dd);
++	goto dma;
++ engine:
++	crypto_engine_exit(dd->engine);
++ dma:
++	sg_release_dma(dd);
++	goto unlock;
++ irq:
++	devm_free_irq(dev, dd->irq, dd);
++ clocks:
++ unlock:
++	mutex_unlock(&sg_probe_lock);
++	return dev_err_probe(dev, err, "could not register CryptoDMA\n");
++}
++
++static void sg_remove(struct platform_device *pdev)
++{
++	struct sg_crypto_dev *dd = platform_get_drvdata(pdev);
++
++	mutex_lock(&sg_probe_lock);
++	sg_disconnect(dd);
++	sg_unregister(dd);
++	sg_release_dma(dd);
++	mutex_unlock(&sg_probe_lock);
++}
++
++static void sg_shutdown(struct platform_device *pdev)
++{
++	struct sg_crypto_dev *dd = platform_get_drvdata(pdev);
++
++	sg_disconnect(dd);
++	sg_release_dma(dd);
++}
++
++static const struct of_device_id sg_match[] = {
++	{ .compatible = "sophgo,sg2002-crypto" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, sg_match);
++
++static struct platform_driver sg_driver = {
++	.probe = sg_probe,
++	.remove = sg_remove,
++	.shutdown = sg_shutdown,
++	.driver = {
++		.name = "sg2002-crypto",
++		.of_match_table = sg_match,
++	},
++};
++module_platform_driver(sg_driver);
++
++MODULE_DESCRIPTION("Sophgo SG2002 CryptoDMA accelerator");
++MODULE_LICENSE("GPL");

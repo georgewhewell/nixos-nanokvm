@@ -16,6 +16,7 @@
 , runCommand
 , dtc
 , gcc
+, patch
 , linuxSrc
 , python3
 , writeText
@@ -30,10 +31,11 @@ let
   buildDtb = name: overlays:
     runCommand "${name}.dtb"
       {
-        nativeBuildInputs = [ dtc gcc ];
+        nativeBuildInputs = [ dtc gcc patch ];
       } ''
       tar -xf ${linuxSrc}
       SRC=$(echo linux-*/)
+      patch -d "$SRC" -p1 < ${../linux-mainline/patches/0089-riscv-dts-sophgo-add-sg2002-cryptodma.patch}
       DTS=$SRC/arch/riscv/boot/dts/sophgo/sg2002-licheerv-nano-b.dts
 
       cat "$DTS" ${lib.concatMapStringsSep " " (p: "${p}") overlays} \

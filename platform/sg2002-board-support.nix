@@ -60,6 +60,7 @@
 in {
   imports = [
     ../modules/bluetooth-aic8800.nix
+    ../modules/sg2002-crypto.nix
     ../modules/sg2002-audio.nix
     ../modules/sg2002-c906l.nix
   ];

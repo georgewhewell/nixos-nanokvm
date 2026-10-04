@@ -50,6 +50,14 @@ let
       patch = ./patches/0082-dt-bindings-iio-adc-sophgo-describe-channel-consumers.patch;
     })
     (patch {
+      name = "crypto-sg2002-cryptodma";
+      patch = ./patches/0088-crypto-add-sg2002-cryptodma.patch;
+    })
+    (patch {
+      name = "riscv-dts-sophgo-sg2002-cryptodma";
+      patch = ./patches/0089-riscv-dts-sophgo-add-sg2002-cryptodma.patch;
+    })
+    (patch {
       name = "clk-cv18xx-check-pll-lock-status";
       patch = ./patches/0074-clk-cv18xx-check-pll-lock-status.patch;
     })
@@ -363,6 +371,18 @@ let
       upstreamStatus = "draft";
       dropWhen = "The CV1800B SARADC binding and SoC node describe IIO consumers upstream";
       notes = "The one-cell argument selects the driver's zero-based channel index.";
+    };
+    "crypto-sg2002-cryptodma" = {
+      origin = "local; descriptor sequence from CVITEK/OneKVM GPL-2.0 SPACC driver";
+      upstreamStatus = "draft";
+      dropWhen = "Upstream provides SG2002 Crypto API support";
+      notes = "Kernel-only skcipher/ahash, standard noncoherent DMA, IRQ completion, bounded private buffers and timeout containment.";
+    };
+    "riscv-dts-sophgo-sg2002-cryptodma" = {
+      origin = "local; Sophgo SG200X TRM";
+      upstreamStatus = "draft";
+      dropWhen = "Upstream sg2002.dtsi describes CryptoDMA";
+      notes = "Master C906 PLIC input 91 and shared EFUSE/APB clocks; applied to standalone DTB builds too.";
     };
     "clk-cv18xx-check-pll-lock-status" = {
       origin = "local";
