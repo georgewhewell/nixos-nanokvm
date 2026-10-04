@@ -144,7 +144,14 @@ measurements include runtime data copies and output conversion, and exclude JPEG
 decoding, NMS and drawing. The detector's FP32 output conversion is substantial CPU
 work; these numbers are not TPU-only latency.
 
-The JPEG examples identified the cat as Egyptian cat and drew dog/car boxes on
+The JPEG examples identified the cat as Egyptian cat and drew dog/bicycle/car boxes on
 `dog.jpg`. Concurrent classifier, detector and matrix workloads also passed.
 Injecting a failed submission made `CVI_NN_Forward` and the sample fail, with no
 result image and no hardware interrupt.
+
+The detector uses the [official YOLOv5 v6.0 confidence/NMS defaults](https://github.com/ultralytics/yolov5/blob/v6.0/detect.py), 0.25/0.45,
+and prints scores on the image. The vendor sample originally used confidence
+0.5, which discarded the bicycle before NMS: its score is 0.371 with INT8 and
+0.388 with the original FP32 ONNX model on the same input. Changing the
+postprocessing threshold displays that existing detection; it does not improve
+the model's accuracy.

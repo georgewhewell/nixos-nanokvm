@@ -72,7 +72,7 @@ index f8859a2..0109742 100644
    std::vector<size_t> idx(count);
    std::iota(idx.begin(), idx.end(), 0);
 diff --git a/samples/samples_extra/detector_yolov5_fused_preprocess/detector_yolov5_fused_preprocess.cpp b/samples/samples_extra/detector_yolov5_fused_preprocess/detector_yolov5_fused_preprocess.cpp
-index 3b52e41..b9691a2 100644
+index 3b52e41..500a2d1 100644
 --- a/samples/samples_extra/detector_yolov5_fused_preprocess/detector_yolov5_fused_preprocess.cpp
 +++ b/samples/samples_extra/detector_yolov5_fused_preprocess/detector_yolov5_fused_preprocess.cpp
 @@ -7,6 +7,7 @@
@@ -110,7 +110,21 @@ index 3b52e41..b9691a2 100644
      usage(argv);
      exit(-1);
    }
-@@ -252,6 +253,26 @@ int main(int argc, char **argv) {
+@@ -221,9 +222,10 @@ int main(int argc, char **argv) {
+   float qscale;
+   int bbox_len = 85; // classes num + 5
+   int classes_num = 80;
+-  float conf_thresh = 0.5;
+-  float iou_thresh = 0.5;
+-  float obj_thresh = 0.5;
++  // YOLOv5 v6.0 detect.py defaults: confidence 0.25, class-aware NMS IoU 0.45.
++  // https://github.com/ultralytics/yolov5/blob/v6.0/detect.py
++  float conf_thresh = 0.25;
++  float iou_thresh = 0.45;
+ 
+   ret = CVI_NN_RegisterModel(argv[1], &model);
+   if (ret != CVI_RC_SUCCESS) {
+@@ -252,6 +254,26 @@ int main(int argc, char **argv) {
    height = input_shape.dim[2];
    width = input_shape.dim[3];
  
@@ -137,7 +151,7 @@ index 3b52e41..b9691a2 100644
    // imread
    cv::Mat image;
    image = cv::imread(argv[2]);
-@@ -293,7 +314,12 @@ int main(int argc, char **argv) {
+@@ -293,7 +315,12 @@ int main(int argc, char **argv) {
    }
  
    // run inference
@@ -151,7 +165,14 @@ index 3b52e41..b9691a2 100644
  
    // do post proprocess
    int det_num = 0;
-@@ -341,7 +367,10 @@ int main(int argc, char **argv) {
+@@ -336,12 +363,16 @@ int main(int argc, char **argv) {
+     int y2 = (b.y + b.h / 2);
+     cv::rectangle(cloned, cv::Point(x1, y1), cv::Point(x2, y2),
+                   cv::Scalar(255, 255, 0), 3, 8, 0);
+-    cv::putText(cloned, coco_names[dets[i].cls], cv::Point(x1, y1),
++    cv::putText(cloned, cv::format("%s %.2f", coco_names[dets[i].cls], dets[i].score),
++                cv::Point(x1, y1),
+                 cv::FONT_HERSHEY_DUPLEX, 1.0, cv::Scalar(0, 0, 255), 2);
    }
  
    // save or show picture
