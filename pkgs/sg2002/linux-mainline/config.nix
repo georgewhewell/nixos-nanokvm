@@ -719,8 +719,8 @@ with lib.kernel; {
   VETH = no;
   VXLAN = no;
 
-  # No AF_ALG consumers or virtual crypto device. Keep only the algorithms
-  # selected by zram/Zstd and the NFS client.
+  # CryptoDMA serves kernel Crypto API consumers; AF_ALG remains disabled.
+  CRYPTO_DEV_SG2002 = module;
   CRYPTO_USER_API = no;
   CRYPTO_USER_API_HASH = no;
   CRYPTO_USER_API_ENABLE_OBSOLETE = no;
