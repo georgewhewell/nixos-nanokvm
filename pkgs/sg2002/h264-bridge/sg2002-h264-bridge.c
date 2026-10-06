@@ -3,7 +3,8 @@
  *
  * HDMI UYVY or ISP NV21 -> VPSS scaler/CSC -> NV12 -> Coda encoder.
  * Capture buffers are exported to VPSS; VPSS and Coda share DMA-BUFs.
- * The CPU moves buffer descriptors, without converting raw pixels.
+ * The base path moves buffer descriptors without converting raw pixels.
+ * Optional TPU detection samples NV12 and paints overlays before encoding.
  * Sinks: Annex-B file/stdout and/or RTSP publisher (MediaMTX).
  *
  * SPDX-License-Identifier: GPL-2.0-only
@@ -33,6 +34,9 @@
 #include <time.h>
 #include <netdb.h>
 #include <unistd.h>
+#ifdef ENABLE_DETECTION
+#include "detection.h"
+#endif
 
 #define CAPTURE_BUFFERS 2
 #define ENCODER_CAP_BUFFERS 3
@@ -1622,6 +1626,10 @@ struct bridge_options {
 	const char *scaler_path;
 	const char *output_path;
 	const char *rtsp_url;
+#ifdef ENABLE_DETECTION
+	const char *detect_model;
+	unsigned int detect_fps;
+#endif
 #ifdef ENABLE_PCMA
 	const char *audio_pcma_device;
 #endif
@@ -1652,8 +1660,8 @@ static void die_step(void)
  * -> hardware CSC/scale -> VPSS CAPTURE (shared CMA-heap dmabuf)
  * -> encoder OUTPUT (same dmabuf imported again) -> H.264.
  *
- * The CPU touches no frame data: per frame the bridge only moves dmabuf
- * fds between the three queues.  The VPSS CAPTURE format carries the
+ * Without detection, the bridge only moves dmabuf fds between the three
+ * queues. The VPSS CAPTURE format carries the
  * encoder's macroblock-padded geometry (e.g. 1920x1088) while the
  * CAPTURE-side crop selection marks the visible image (1920x1080), so
  * the scaler DMA lands exactly in the surface layout Coda980 expects.
@@ -1680,6 +1688,9 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 	int capture_on = 0, encoder_out_on = 0, encoder_cap_on = 0;
 	int scaler_out_on = 0, scaler_cap_on = 0, ret = -1;
 	struct rtsp_sink rtsp;
+#ifdef ENABLE_DETECTION
+	struct sg2002_detection *detection = NULL;
+#endif
 #ifdef ENABLE_PCMA
 	struct audio_source audio = { 0 };
 #endif
@@ -1782,6 +1793,14 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 		goto out_errno;
 	if (encoder_cap_fmt.pixelformat != V4L2_PIX_FMT_H264)
 		goto out;
+#ifdef ENABLE_DETECTION
+	if (opts->detect_model) {
+		detection = sg2002_detection_open(opts->detect_model, &encoder_out_fmt,
+			visible_width, visible_height, opts->detect_fps);
+		if (!detection)
+			goto out;
+	}
+#endif
 	if (set_encoder_controls(encoder_fd, opts->bitrate, opts->gop))
 		fprintf(stderr, "warning: encoder controls rejected, running firmware defaults\n");
 	fprintf(stderr, "init: encoder formats ok\n");
@@ -2068,6 +2087,14 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 				fprintf(stderr, "scaler returned an unexpected capture buffer\n");
 				goto out;
 			}
+#ifdef ENABLE_DETECTION
+			if (detection && sg2002_detection_frame(detection,
+				mid.bufs[buffer.index].dmabuf_fd, mid.bufs[buffer.index].addr,
+				mid.bufs[buffer.index].length)) {
+				fprintf(stderr, "detection: frame processing failed\n");
+				goto out;
+			}
+#endif
 			if (queue_dmabuf(encoder_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT,
 					 buffer.index, mid.bufs[buffer.index].dmabuf_fd,
 					 encoder_out_fmt.sizeimage))
@@ -2179,6 +2206,9 @@ out_errno:
 	if (ret)
 		die_step();
 out:
+#ifdef ENABLE_DETECTION
+	sg2002_detection_close(detection);
+#endif
 	if (scaler_out_on)
 		stream(scaler_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT, 0);
 	if (scaler_cap_on)
@@ -2241,6 +2271,11 @@ static void usage(const char *program)
 		"  --max-fps N          cap scaling and encode rate; requeue\n"
 		"                       excess capture frames (default unlimited)\n",
 		program);
+#ifdef ENABLE_DETECTION
+	fputs("  --detect-model PATH YOLOv5n model: sample NV12 frames, overlay boxes/labels\n"
+	      "  --detect-fps N      maximum inference rate, 1..10 (default 2); video\n"
+	      "                       continues independently; stale boxes expire\n", stderr);
+#endif
 #ifdef ENABLE_PCMA
 	fputs("  --audio-pcma DEVICE  opt-in ALSA capture: 48 kHz stereo S16_LE to\n"
 	      "                       PCMA/8 kHz mono RTP (requires --rtsp)\n"
@@ -2257,6 +2292,9 @@ int main(int argc, char **argv)
 		.scaler_path = DEFAULT_SCALER,
 		.output_path = NULL,
 		.rtsp_url = NULL,
+#ifdef ENABLE_DETECTION
+		.detect_fps = 2,
+#endif
 #ifdef ENABLE_PCMA
 		.audio_pcma_device = NULL,
 #endif
@@ -2282,6 +2320,15 @@ int main(int argc, char **argv)
 			opts.output_path = argv[++i];
 		else if (!strcmp(arg, "--rtsp") && i + 1 < argc)
 			opts.rtsp_url = argv[++i];
+#ifdef ENABLE_DETECTION
+		else if (!strcmp(arg, "--detect-model") && i + 1 < argc)
+			opts.detect_model = argv[++i];
+		else if (!strcmp(arg, "--detect-fps") && i + 1 < argc) {
+			if (parse_u32(argv[++i], &opts.detect_fps) ||
+			    !opts.detect_fps || opts.detect_fps > 10)
+				goto bad_usage;
+		}
+#endif
 #ifdef ENABLE_PCMA
 		else if (!strcmp(arg, "--audio-pcma") && i + 1 < argc)
 			opts.audio_pcma_device = argv[++i];
