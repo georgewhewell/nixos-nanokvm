@@ -1,0 +1,55 @@
+From: George Whewell <georgerw@gmail.com>
+Subject: [PATCH] media: coda: use Coda980 bitrate register on SG2002
+
+Writing the Coda960 target to RC_PARA and clearing RC_PARA2 leaves the
+SG2002 encoder in constant-QP mode regardless of V4L2's requested bitrate.
+Use the Coda980 target/CBR layout, disable automatic frame skipping and
+initialise its optional intra-size and delta-QP constraints.
+
+Register ABI and kbit/s units follow Sophgo's Coda9VpuEncSetup:
+https://github.com/sophgo/osdrv/blob/1b3a49649d18488ecf54fb4fcb6c27599e433fdc/interdrv/cvi_vc_drv/vcodec/vpuapi/coda9/coda9.c
+
+---
+diff --git a/drivers/media/platform/chips-media/coda/coda-bit.c b/drivers/media/platform/chips-media/coda/coda-bit.c
+index 6e7fe77..b8dc7ed 100644
+--- a/drivers/media/platform/chips-media/coda/coda-bit.c
++++ b/drivers/media/platform/chips-media/coda/coda-bit.c
+@@ -1315,13 +1315,22 @@ static int coda_start_encoding(struct coda_ctx *ctx)
+ 	} else {
+ 		value = 0;
+ 	}
+-	coda_write(dev, value, CODA_CMD_ENC_SEQ_RC_PARA);
+ 	if (dev->devtype->has_coda980_h264_abi &&
+ 	    dst_fourcc == V4L2_PIX_FMT_H264) {
+-		/* Coda980-specific RC registers are not part of the Coda960 ABI. */
+-		coda_write(dev, 0, CODA9_CMD_ENC_SEQ_RC_PARA2);
++		u32 bitrate = value ? ctx->params.bitrate : 0;
++
++		/* Coda980 puts the target (kbit/s) and CBR mode in RC_PARA2.
++		 * RC_PARA holds delay/skip/HVS controls, not the Coda960 target.
++		 * Disable firmware frame skipping to retain the input cadence.
++		 */
++		value = bitrate ? BIT(31) | (ctx->params.vbv_delay << 16) : 0;
++		coda_write(dev, bitrate ? (bitrate << 4) | 1 : 0,
++			   CODA9_CMD_ENC_SEQ_RC_PARA2);
+ 		coda_write(dev, 0, CODA9_CMD_ENC_SEQ_QP_RANGE_SET);
++		coda_write(dev, 0, CODA980_CMD_ENC_SEQ_RC_MAX_INTRA_SIZE);
++		coda_write(dev, 0, CODA980_CMD_ENC_SEQ_DELTA_QP);
+ 	}
++	coda_write(dev, value, CODA_CMD_ENC_SEQ_RC_PARA);
+ 
+ 	coda_write(dev, ctx->params.vbv_size, CODA_CMD_ENC_SEQ_RC_BUF_SIZE);
+ 	coda_write(dev, ctx->params.intra_refresh,
+diff --git a/drivers/media/platform/chips-media/coda/coda_regs.h b/drivers/media/platform/chips-media/coda/coda_regs.h
+index e32b51e..013e3b4 100644
+--- a/drivers/media/platform/chips-media/coda/coda_regs.h
++++ b/drivers/media/platform/chips-media/coda/coda_regs.h
+@@ -339,6 +339,8 @@
+ #define CODA9_CMD_ENC_SEQ_ME_OPTION				0x1d8
+ #define CODA9_CMD_ENC_SEQ_RC_PARA2				0x1dc
+ #define CODA9_CMD_ENC_SEQ_QP_RANGE_SET			0x1e0
++#define CODA980_CMD_ENC_SEQ_RC_MAX_INTRA_SIZE		0x1f0
++#define CODA980_CMD_ENC_SEQ_DELTA_QP			0x1f4
+ #define		CODA980_ME_LINE_BUFFER_MODE_SHIFT	9
+ #define		CODA980_ME_LINE_BUFFER_MODE		2
+ #define CODA_RET_ENC_SEQ_SUCCESS				0x1c0
