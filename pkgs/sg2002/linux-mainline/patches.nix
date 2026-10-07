@@ -373,9 +373,43 @@ let
       name = "media-sophgo-sg2002-vpss-no-register-access-with-clocks-off";
       patch = ./patches/0081-media-sophgo-SG2002-VPSS-no-register-access-with-clocks-off.patch;
     })
+    (patch {
+      name = "media-sophgo-vpss-flip-controls";
+      patch = ./patches/0092-media-sophgo-vpss-add-flip-controls.patch;
+    })
+    (patch {
+      name = "media-sophgo-isp-gamma-white-balance";
+      patch = ./patches/0093-media-sophgo-ISP-gamma-white-balance.patch;
+    })
+    (patch {
+      name = "media-coda-sg2002-colour-signalling";
+      patch = ./patches/0094-media-coda-signal-SG2002-H264-colour.patch;
+    })
+    (patch {
+      name = "media-coda-sg2002-rate-control";
+      patch = ./patches/0095-media-coda-use-SG2002-rate-control-registers.patch;
+    })
   ];
 
   meta = {
+    "media-coda-sg2002-rate-control" = {
+      origin = "local, following Sophgo's Coda980 firmware ABI";
+      upstreamStatus = "draft";
+      dropWhen = "Coda980 honours the V4L2 target bitrate";
+      notes = "Use RC_PARA2 for the Coda980 bitrate and CBR mode.";
+    };
+    "media-coda-sg2002-colour-signalling" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "Coda980 signals negotiated V4L2 colourimetry in its SPS";
+      notes = "H.264 VUI range, primaries, transfer and matrix for the SG2002 encoder.";
+    };
+    "media-sophgo-isp-gamma-white-balance" = {
+      origin = "local, using Sophgo's CV181x ISP register implementation";
+      upstreamStatus = "draft";
+      dropWhen = "mainline SG2002 ISP supports gamma and white balance";
+      notes = "Hardware sRGB gamma, frame-boundary red/blue balance controls and accurate sensor frame intervals.";
+    };
     "hwrng-sg2002" = {
       origin = "local adaptation of Barebox starfive-vic-rng and Synopsys embARC OSP";
       upstreamStatus = "draft";
@@ -478,6 +512,12 @@ let
       upstreamStatus = "draft";
       dropWhen = "CV18xx uses sdhci_set_power_and_bus_voltage upstream";
       notes = "Preserve SDHCI voltage-selection bits when C906L mediates PicoClaw Wi-Fi power through vmmc.";
+    };
+    "media-sophgo-vpss-flip-controls" = {
+      origin = "local; ODMA flip bits documented by sophgo/osdrv sg200x-dev";
+      upstreamStatus = "draft";
+      dropWhen = "Folded into the SG2002 VPSS driver before submission";
+      notes = "Per-file HFLIP/VFLIP controls applied by output DMA to the visible crop, preserving coded-height padding.";
     };
     "media-sophgo-align-vpss-format-enumeration" = {
       origin = "local";

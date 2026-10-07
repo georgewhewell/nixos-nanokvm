@@ -317,6 +317,7 @@
       nixosModules.extlinuxTryBoot = import ./modules/extlinux-try-boot.nix;
       nixosModules.nanokvm = import ./modules/nanokvm.nix;
       nixosModules.sg2002C906L = import ./modules/sg2002-c906l.nix;
+      nixosModules.sg2002CameraStream = import ./modules/sg2002-camera-stream.nix;
       nixosModules.default = {
         imports = [
           self.nixosModules.nanokvm
@@ -451,6 +452,7 @@
             sg2002-c906l-rust-timer7
             sg2002-c906l-rust-all-timers
             sg2002-h264-bridge
+            sg2002-h264-bridge-detection
             sg2002-h264-bridge-pcma
             sg2002-kernel-mainline
             sg2002-cvikernel
@@ -558,6 +560,7 @@
             "nanokvm-server"
             "sg2002-cviruntime"
             "sg2002-tpu-examples"
+            "sg2002-h264-bridge-detection"
             "sg2002-tpu-mobilenet-v2"
             "sg2002-tpu-yolov5n"
           ] self.packages.x86_64-linux;
@@ -568,6 +571,9 @@
             "sg2002-c906l-picoclaw-sd-module-eval"
             "sg2002-usb-boot-runner"
             "sg2002-h264-bridge-colour"
+            "sg2002-h264-detection"
+            "sg2002-camera-auto"
+            "sg2002-isp-state"
             "sg2002-c906-tuning"
             "sg2002-wifi-ack-filter"
             "sg2002-clock-kunit"
@@ -708,6 +714,9 @@
           sg2002-usb-boot-runner = pkgs.sg2002-usb-boot.tests.mainlineRunner;
           sg2002-h264-bridge-colour =
             pkgs.callPackage ./pkgs/sg2002/h264-bridge/test-colour.nix { };
+          sg2002-camera-auto = pkgs.callPackage ./pkgs/sg2002/h264-bridge/test-camera-auto.nix { };
+          sg2002-h264-detection =
+            pkgs.callPackage ./pkgs/sg2002/h264-bridge/test-detection.nix { };
           sg2002-c906-tuning = import ./tests/sg2002-c906-tuning.nix {
             inherit pkgs;
             targetPkgs = boardSystems.pcie.mainline.sd.pkgs;
@@ -717,6 +726,7 @@
             targetPkgs = boardSystems.picoclaw.mainline.initrd.default.pkgs;
             kernel = picoclawLcdConfig.boot.kernelPackages.kernel;
           };
+          sg2002-isp-state = pkgs.callPackage ./pkgs/sg2002/linux-mainline/tests/isp-state.nix { };
           sg2002-vpss-state =
             pkgs.callPackage ./pkgs/sg2002/linux-mainline/tests/vpss-state.nix { };
           sg2002-clock-kunit =

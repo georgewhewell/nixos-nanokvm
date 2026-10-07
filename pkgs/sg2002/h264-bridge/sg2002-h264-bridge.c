@@ -3,7 +3,8 @@
  *
  * HDMI UYVY or ISP NV21 -> VPSS scaler/CSC -> NV12 -> Coda encoder.
  * Capture buffers are exported to VPSS; VPSS and Coda share DMA-BUFs.
- * The CPU moves buffer descriptors, without converting raw pixels.
+ * The base path moves buffer descriptors without converting raw pixels.
+ * Optional TPU detection samples NV12 and paints overlays before encoding.
  * Sinks: Annex-B file/stdout and/or RTSP publisher (MediaMTX).
  *
  * SPDX-License-Identifier: GPL-2.0-only
@@ -33,6 +34,10 @@
 #include <time.h>
 #include <netdb.h>
 #include <unistd.h>
+#include "camera-auto.h"
+#ifdef ENABLE_DETECTION
+#include "detection.h"
+#endif
 
 #define CAPTURE_BUFFERS 2
 #define ENCODER_CAP_BUFFERS 3
@@ -1622,6 +1627,10 @@ struct bridge_options {
 	const char *scaler_path;
 	const char *output_path;
 	const char *rtsp_url;
+#ifdef ENABLE_DETECTION
+	const char *detect_model;
+	unsigned int detect_fps;
+#endif
 #ifdef ENABLE_PCMA
 	const char *audio_pcma_device;
 #endif
@@ -1631,6 +1640,10 @@ struct bridge_options {
 	unsigned int mid_buffers;
 	unsigned int capture_buffers;
 	unsigned int frame_limit;
+	unsigned int rotation;
+	const char *sensor_path;
+	unsigned int mains;
+	int auto_camera;
 	int half_scale;
 	int use_isp;
 	int mid_heap_reserved;
@@ -1652,8 +1665,8 @@ static void die_step(void)
  * -> hardware CSC/scale -> VPSS CAPTURE (shared CMA-heap dmabuf)
  * -> encoder OUTPUT (same dmabuf imported again) -> H.264.
  *
- * The CPU touches no frame data: per frame the bridge only moves dmabuf
- * fds between the three queues.  The VPSS CAPTURE format carries the
+ * Without detection or camera metering, the bridge only moves dmabuf fds
+ * between the three queues. The VPSS CAPTURE format carries the
  * encoder's macroblock-padded geometry (e.g. 1920x1088) while the
  * CAPTURE-side crop selection marks the visible image (1920x1080), so
  * the scaler DMA lands exactly in the surface layout Coda980 expects.
@@ -1680,6 +1693,10 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 	int capture_on = 0, encoder_out_on = 0, encoder_cap_on = 0;
 	int scaler_out_on = 0, scaler_cap_on = 0, ret = -1;
 	struct rtsp_sink rtsp;
+	struct camera_auto *camera = NULL;
+#ifdef ENABLE_DETECTION
+	struct sg2002_detection *detection = NULL;
+#endif
 #ifdef ENABLE_PCMA
 	struct audio_source audio = { 0 };
 #endif
@@ -1713,6 +1730,19 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 	if (scaler_fd < 0) {
 		die_errno(opts->scaler_path);
 		goto out;
+	}
+	if (opts->rotation == 180) {
+		struct v4l2_ext_control controls[] = {
+			{ .id = V4L2_CID_HFLIP, .value = 1 },
+			{ .id = V4L2_CID_VFLIP, .value = 1 },
+		};
+		struct v4l2_ext_controls list = {
+			.count = 2, .controls = controls,
+		};
+		if (xioctl(scaler_fd, VIDIOC_S_EXT_CTRLS, &list)) {
+			die_errno("VPSS hardware rotation");
+			goto out;
+		}
 	}
 	if (opts->output_path) {
 		if (!strcmp(opts->output_path, "-"))
@@ -1782,6 +1812,19 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 		goto out_errno;
 	if (encoder_cap_fmt.pixelformat != V4L2_PIX_FMT_H264)
 		goto out;
+	if (opts->auto_camera) {
+		camera = camera_auto_open(opts->sensor_path, capture_fd,
+			&encoder_out_fmt, visible_width, visible_height, opts->mains);
+		if (!camera) goto out;
+	}
+#ifdef ENABLE_DETECTION
+	if (opts->detect_model) {
+		detection = sg2002_detection_open(opts->detect_model, &encoder_out_fmt,
+			visible_width, visible_height, opts->detect_fps);
+		if (!detection)
+			goto out;
+	}
+#endif
 	if (set_encoder_controls(encoder_fd, opts->bitrate, opts->gop))
 		fprintf(stderr, "warning: encoder controls rejected, running firmware defaults\n");
 	fprintf(stderr, "init: encoder formats ok\n");
@@ -2068,6 +2111,20 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 				fprintf(stderr, "scaler returned an unexpected capture buffer\n");
 				goto out;
 			}
+			if (camera && camera_auto_frame(camera,
+				mid.bufs[buffer.index].dmabuf_fd, mid.bufs[buffer.index].addr,
+				mid.bufs[buffer.index].length)) {
+				fprintf(stderr, "camera auto: frame update failed: %s\n", strerror(errno));
+				goto out;
+			}
+#ifdef ENABLE_DETECTION
+			if (detection && sg2002_detection_frame(detection,
+				mid.bufs[buffer.index].dmabuf_fd, mid.bufs[buffer.index].addr,
+				mid.bufs[buffer.index].length)) {
+				fprintf(stderr, "detection: frame processing failed\n");
+				goto out;
+			}
+#endif
 			if (queue_dmabuf(encoder_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT,
 					 buffer.index, mid.bufs[buffer.index].dmabuf_fd,
 					 encoder_out_fmt.sizeimage))
@@ -2155,9 +2212,17 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 			}
 		}
 		if (!progress) {
+			int scaler_pending = 0;
+			for (i = 0; i < mid.count; i++)
+				scaler_pending |= mid_state[i] == MID_AT_VPSS;
+			/* An empty mem2mem queue reports POLLERR immediately. Only
+			 * wait on VPSS while it owns a buffer, and on capture while
+			 * we can dequeue its next frame. */
 			struct pollfd fds[3] = {
-				{ .fd = capture_fd, .events = POLLIN },
-				{ .fd = scaler_fd, .events = POLLIN | POLLOUT },
+				{ .fd = held_capture == UINT32_MAX ? capture_fd : -1,
+				  .events = POLLIN },
+				{ .fd = scaler_pending ? scaler_fd : -1,
+				  .events = POLLIN | POLLOUT },
 				{ .fd = encoder_fd, .events = POLLIN | POLLOUT },
 			};
 			if (poll(fds, 3,
@@ -2179,6 +2244,10 @@ out_errno:
 	if (ret)
 		die_step();
 out:
+	camera_auto_close(camera);
+#ifdef ENABLE_DETECTION
+	sg2002_detection_close(detection);
+#endif
 	if (scaler_out_on)
 		stream(scaler_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT, 0);
 	if (scaler_cap_on)
@@ -2229,6 +2298,10 @@ static void usage(const char *program)
 		"  --scaler-node PATH   VPSS mem2mem node (default " DEFAULT_SCALER ")\n"
 		"  --isp               select hardware Bayer->NV21 capture and VPSS->NV12;\n"
 		"                       quarter size (640x360 on GC4653), or --size half\n"
+		"  --rotate 0|180      rotate in VPSS before detection and encoding\n"
+		"  --auto-camera       automatic exposure and white balance (requires --isp)\n"
+		"  --sensor-node PATH  GC4653 subdevice (default /dev/v4l-subdev0)\n"
+		"  --mains-frequency N lighting frequency: 0, 50 (default), or 60 Hz\n"
 		"  --frames N          stop after N encoded live frames, excluding the one\n"
 		"                       priming picture retained in the stream (default unlimited)\n"
 		"  --mid-buffers N      shared scaler/encoder buffers (default 4)\n"
@@ -2241,6 +2314,11 @@ static void usage(const char *program)
 		"  --max-fps N          cap scaling and encode rate; requeue\n"
 		"                       excess capture frames (default unlimited)\n",
 		program);
+#ifdef ENABLE_DETECTION
+	fputs("  --detect-model PATH YOLOv5n model: sample NV12 frames, overlay boxes/labels\n"
+	      "  --detect-fps N      maximum inference rate, 1..10 (default 2); video\n"
+	      "                       continues independently; stale boxes expire\n", stderr);
+#endif
 #ifdef ENABLE_PCMA
 	fputs("  --audio-pcma DEVICE  opt-in ALSA capture: 48 kHz stereo S16_LE to\n"
 	      "                       PCMA/8 kHz mono RTP (requires --rtsp)\n"
@@ -2255,8 +2333,13 @@ int main(int argc, char **argv)
 		.capture_path = DEFAULT_CAPTURE,
 		.encoder_path = DEFAULT_ENCODER,
 		.scaler_path = DEFAULT_SCALER,
+		.sensor_path = "/dev/v4l-subdev0",
+		.mains = 50,
 		.output_path = NULL,
 		.rtsp_url = NULL,
+#ifdef ENABLE_DETECTION
+		.detect_fps = 2,
+#endif
 #ifdef ENABLE_PCMA
 		.audio_pcma_device = NULL,
 #endif
@@ -2282,6 +2365,15 @@ int main(int argc, char **argv)
 			opts.output_path = argv[++i];
 		else if (!strcmp(arg, "--rtsp") && i + 1 < argc)
 			opts.rtsp_url = argv[++i];
+#ifdef ENABLE_DETECTION
+		else if (!strcmp(arg, "--detect-model") && i + 1 < argc)
+			opts.detect_model = argv[++i];
+		else if (!strcmp(arg, "--detect-fps") && i + 1 < argc) {
+			if (parse_u32(argv[++i], &opts.detect_fps) ||
+			    !opts.detect_fps || opts.detect_fps > 10)
+				goto bad_usage;
+		}
+#endif
 #ifdef ENABLE_PCMA
 		else if (!strcmp(arg, "--audio-pcma") && i + 1 < argc)
 			opts.audio_pcma_device = argv[++i];
@@ -2293,6 +2385,18 @@ int main(int argc, char **argv)
 				goto bad_usage;
 		} else if (!strcmp(arg, "--isp")) {
 			opts.use_isp = 1;
+		} else if (!strcmp(arg, "--auto-camera")) {
+			opts.auto_camera = 1;
+		} else if (!strcmp(arg, "--sensor-node") && i + 1 < argc) {
+			opts.sensor_path = argv[++i];
+		} else if (!strcmp(arg, "--mains-frequency") && i + 1 < argc) {
+			if (parse_u32(argv[++i], &opts.mains) ||
+			    (opts.mains != 0 && opts.mains != 50 && opts.mains != 60))
+				goto bad_usage;
+		} else if (!strcmp(arg, "--rotate") && i + 1 < argc) {
+			if (parse_u32(argv[++i], &opts.rotation) ||
+			    (opts.rotation != 0 && opts.rotation != 180))
+				goto bad_usage;
 		} else if (!strcmp(arg, "--frames") && i + 1 < argc) {
 			if (parse_u32(argv[++i], &opts.frame_limit) || !opts.frame_limit)
 				goto bad_usage;
@@ -2344,6 +2448,8 @@ int main(int argc, char **argv)
 	if (sigemptyset(&action.sa_mask) || sigaction(SIGINT, &action, NULL) ||
 	    sigaction(SIGTERM, &action, NULL))
 		return EXIT_FAILURE;
+	if (opts.auto_camera && !opts.use_isp) goto bad_usage;
+
 	return live_bridge_vpss(&opts) ? EXIT_FAILURE : EXIT_SUCCESS;
 
 bad_usage:

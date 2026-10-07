@@ -1,4 +1,4 @@
-"""Compile the patched driver's real queue/format code against a small host shim."""
+"""Compile the patched driver's real state/register code against a small host shim."""
 import pathlib
 import re
 import sys
@@ -20,7 +20,7 @@ def declaration(prefix):
     return source[start:end]
 
 
-parts = re.findall(r"^#define (?:HW_FMT_\w+|VPSS_MIN_DIM|VPSS_MAX_DIM)\s+[^\n]+",
+parts = re.findall(r"^#define\s+(?:HW_FMT_\w+|VPSS_MIN_DIM|VPSS_MAX_DIM|IMG_\w+|SC_\w+|ODMA_\w+|TOP_\w+|CFG1_\w+|CSC_\w+)\s+[^\n]+",
                    source, re.MULTILINE)
 for prefix in ["struct vpss_fmt {", "struct vpss_q_data {", "struct vpss_ctx {",
                "static const struct vpss_fmt vpss_out_fmts[]",
@@ -29,6 +29,8 @@ for prefix in ["struct vpss_fmt {", "struct vpss_q_data {", "struct vpss_ctx {",
                "static const struct vpss_fmt *vpss_find_fmt",
                "static int vpss_enum_fmt", "static void vpss_get_colorimetry",
                "static int vpss_g_fmt", "static int vpss_try_fmt",
-               "static int vpss_s_fmt"]:
+               "static int vpss_s_fmt", "static void vpss_write_mask",
+               "static void vpss_set_addr", "static void vpss_job_hw",
+               "static int vpss_s_ctrl"]:
     parts.append(declaration(prefix))
 print(fixture.replace("/* DRIVER_STATE */", "\n\n".join(parts)))

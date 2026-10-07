@@ -1,0 +1,288 @@
+From: George Whewell <georgerw@gmail.com>
+Subject: [PATCH] media: sophgo: enable ISP gamma and white-balance controls
+
+Program an sRGB RGB-gamma LUT before streaming and report its transfer
+function to downstream users. Remove the GC4653 black pedestal before
+white balance and gamma; raw capture confirms the vendor black pedestal.
+Expose clustered V4L2 red/blue balance controls, applied at frame
+completion with no clocks-off MMIO. Raw and HDMI capture remain
+unaffected. Report the GC4653 frame interval from VTS.
+
+Register sequence and Q10 gain representation follow:
+https://github.com/sophgo/osdrv/blob/1b3a49649d18488ecf54fb4fcb6c27599e433fdc/interdrv/vi/chip/cv181x/vip/vi_tun_ip_ctrl.c
+
+GC4653 black-level calibration:
+https://github.com/sipeed/LicheeRV-Nano-Build/blob/d4003f15b35d43ad4842f427050ab2bba0114fa5/middleware/v2/component/isp/sensor/cv182x/gcore_gc4653/gc4653_cmos_param.h
+
+---
+diff --git a/drivers/media/i2c/gc4653.c b/drivers/media/i2c/gc4653.c
+index 34f6834..9e82f1a 100644
+--- a/drivers/media/i2c/gc4653.c
++++ b/drivers/media/i2c/gc4653.c
+@@ -520,8 +520,12 @@ static int gc4653_get_frame_interval(struct v4l2_subdev *sd,
+ 				     struct v4l2_subdev_state *state,
+ 				     struct v4l2_subdev_frame_interval *fi)
+ {
+-	fi->interval.numerator = 1;
+-	fi->interval.denominator = 30;
++	struct gc4653 *gc4653 = to_gc4653(sd);
++
++	mutex_lock(&gc4653->mutex);
++	fi->interval.numerator = GC4653_NATIVE_HEIGHT + gc4653->vblank->val;
++	fi->interval.denominator = GC4653_DEFAULT_VTS * 30;
++	mutex_unlock(&gc4653->mutex);
+ 	return 0;
+ }
+ 
+diff --git a/drivers/media/platform/sophgo/sg2002-capture.c b/drivers/media/platform/sophgo/sg2002-capture.c
+index 1913b7e..c64d241 100644
+--- a/drivers/media/platform/sophgo/sg2002-capture.c
++++ b/drivers/media/platform/sophgo/sg2002-capture.c
+@@ -31,6 +31,7 @@
+ 
+ #include <media/v4l2-async.h>
+ #include <media/v4l2-device.h>
++#include <media/v4l2-ctrls.h>
+ #include <media/v4l2-event.h>
+ #include <media/v4l2-fwnode.h>
+ #include <media/v4l2-ioctl.h>
+@@ -252,6 +253,10 @@ struct sg2002_capture {
+ 	u32 sizeimage;
+ 	bool yuv_input;
+ 	bool isp;
++	struct v4l2_ctrl_handler controls;
++	struct v4l2_ctrl *wb[2];
++	u32 red_balance, blue_balance;
++	bool wb_pending; /* cached gains, guarded by qlock */
+ };
+ 
+ static inline struct sg2002_buffer *to_sg2002_buffer(struct vb2_buffer *vb)
+@@ -677,6 +682,11 @@ static void sg2002_vi_enable(struct sg2002_capture *cap, dma_addr_t addr)
+ 	if (cap->isp) {
+ 		sg2002_isp_configure(cap->vi, cap->width, cap->height,
+ 				      cap->bytesperline, sg2002_isp_bayer_order(cap), addr);
++		if (cap->source && cap->source->dev &&
++		    of_device_is_compatible(cap->source->dev->of_node, "galaxycore,gc4653"))
++			sg2002_isp_black_level(cap->vi);
++		sg2002_isp_set_wb(cap->vi, cap->red_balance, cap->blue_balance);
++		cap->wb_pending = false;
+ 	} else {
+ 		writel(cap->bytesperline, cap->vi + VI_DMA_SEG_LEN);
+ 		writel(cap->bytesperline, cap->vi + VI_DMA_STRIDE);
+@@ -915,6 +925,10 @@ static irqreturn_t sg2002_irq(int irq, void *data)
+ 		spin_unlock_irqrestore(&cap->qlock, flags);
+ 		return IRQ_HANDLED;
+ 	}
++	if (cap->isp && cap->wb_pending) {
++		sg2002_isp_set_wb(cap->vi, cap->red_balance, cap->blue_balance);
++		cap->wb_pending = false;
++	}
+ 	done = cap->active;
+ 	next = sg2002_next_buffer(cap);
+ 	cap->active = next;
+@@ -1135,11 +1149,11 @@ static void sg2002_fill_pix_format(struct sg2002_capture *cap,
+ 	pix->bytesperline = cap->bytesperline;
+ 	pix->sizeimage = cap->sizeimage;
+ 	if (cap->isp) {
+-		/* Fixed full-range BT.601 CSC, with gamma bypassed. */
++		/* Full-range BT.601 CSC after hardware sRGB gamma. */
+ 		pix->colorspace = V4L2_COLORSPACE_SRGB;
+ 		pix->ycbcr_enc = V4L2_YCBCR_ENC_601;
+ 		pix->quantization = V4L2_QUANTIZATION_FULL_RANGE;
+-		pix->xfer_func = V4L2_XFER_FUNC_NONE;
++		pix->xfer_func = V4L2_XFER_FUNC_SRGB;
+ 	} else if (cap->yuv_input) {
+ 		pix->colorspace = V4L2_COLORSPACE_REC709;
+ 		pix->ycbcr_enc = V4L2_YCBCR_ENC_709;
+@@ -1199,7 +1213,7 @@ static int sg2002_try_fmt(struct file *file, void *priv,
+ 			pix->colorspace = V4L2_COLORSPACE_SRGB;
+ 			pix->ycbcr_enc = V4L2_YCBCR_ENC_601;
+ 			pix->quantization = V4L2_QUANTIZATION_FULL_RANGE;
+-			pix->xfer_func = V4L2_XFER_FUNC_NONE;
++			pix->xfer_func = V4L2_XFER_FUNC_SRGB;
+ 		} else {
+ 			pix->pixelformat = sg2002_repacked_raw_pixelformat(cap->mbus_code);
+ 			pix->bytesperline = ALIGN(DIV_ROUND_UP(cap->width, 2) * 3, 16);
+@@ -1452,6 +1466,29 @@ static int sg2002_parse_endpoint(struct sg2002_capture *cap,
+ 	return 0;
+ }
+ 
++static int sg2002_s_ctrl(struct v4l2_ctrl *ctrl)
++{
++	struct sg2002_capture *cap = container_of(ctrl->handler,
++		struct sg2002_capture, controls);
++	unsigned long flags;
++
++	if (cap->yuv_input)
++		return -EINVAL;
++	/* Never touch registers while clocks are off or midway through a frame.
++	 * Clustered R/B controls are applied together at the post-ISP interrupt.
++	 */
++	spin_lock_irqsave(&cap->qlock, flags);
++	cap->red_balance = cap->wb[0]->val;
++	cap->blue_balance = cap->wb[1]->val;
++	cap->wb_pending = true;
++	spin_unlock_irqrestore(&cap->qlock, flags);
++	return 0;
++}
++
++static const struct v4l2_ctrl_ops sg2002_ctrl_ops = {
++	.s_ctrl = sg2002_s_ctrl,
++};
++
+ static int sg2002_register_media(struct sg2002_capture *cap,
+ 				 struct fwnode_handle *endpoint)
+ {
+@@ -1479,6 +1516,19 @@ static int sg2002_register_media(struct sg2002_capture *cap,
+ 	INIT_LIST_HEAD(&cap->queued);
+ 	INIT_WORK(&cap->error_work, sg2002_error_work);
+ 
++	v4l2_ctrl_handler_init(&cap->controls, 2);
++	cap->wb[0] = v4l2_ctrl_new_std(&cap->controls, &sg2002_ctrl_ops,
++		V4L2_CID_RED_BALANCE, 256, 8192, 1, 1024);
++	cap->wb[1] = v4l2_ctrl_new_std(&cap->controls, &sg2002_ctrl_ops,
++		V4L2_CID_BLUE_BALANCE, 256, 8192, 1, 1024);
++	if (cap->controls.error) {
++		ret = cap->controls.error;
++		goto err_media_unregister;
++	}
++	v4l2_ctrl_cluster(ARRAY_SIZE(cap->wb), cap->wb);
++	cap->red_balance = cap->blue_balance = 1024;
++	vdev->ctrl_handler = &cap->controls;
++
+ 	q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+ 	q->io_modes = VB2_MMAP | VB2_DMABUF;
+ 	q->lock = &cap->lock;
+@@ -1542,6 +1592,7 @@ err_queue_release:
+ err_entity_cleanup_unregistered:
+ 	media_entity_cleanup(&vdev->entity);
+ err_media_unregister:
++	v4l2_ctrl_handler_free(&cap->controls);
+ 	media_device_unregister(&cap->mdev);
+ err_v4l2_unregister:
+ 	v4l2_device_unregister(&cap->v4l2_dev);
+@@ -1662,6 +1713,7 @@ static void sg2002_remove(struct platform_device *pdev)
+ 	 * which may still need cap->source to stop the remote subdevice.
+ 	 */
+ 	vb2_video_unregister_device(&cap->vdev);
++	v4l2_ctrl_handler_free(&cap->controls);
+ 	v4l2_async_nf_unregister(&cap->notifier);
+ 	v4l2_async_nf_cleanup(&cap->notifier);
+ 	media_device_unregister(&cap->mdev);
+diff --git a/drivers/media/platform/sophgo/sg2002-isp.h b/drivers/media/platform/sophgo/sg2002-isp.h
+index 04630c3..1fab38c 100644
+--- a/drivers/media/platform/sophgo/sg2002-isp.h
++++ b/drivers/media/platform/sophgo/sg2002-isp.h
+@@ -6,7 +6,7 @@
+  * online path is FE0 -> BE -> RAW/CFA -> RGB/CSC -> YUV -> DMA46/47.
+  * There is no firmware or auxiliary CPU transaction in this path.
+  *
+- * Initial fixed-function profile: linear Bayer, unity white balance,
++ * Linear Bayer with hardware sRGB gamma, adjustable white balance,
+  * demosaic and RGB-to-YCbCr conversion. Statistics, lens shading, HDR,
+  * temporal filtering and their unallocated DMA channels are disabled.
+  * Native semiplanar output is NV21, suitable for the VPSS mem2mem input.
+@@ -91,6 +91,87 @@ static void sg2002_isp_set_addr(void __iomem *vi, dma_addr_t addr,
+ 			   FIELD_PREP(ISP_DMA_ADDR_HIGH, upper_32_bits(chroma)));
+ }
+ 
++/* CV181x vendor ispblk_gamma_tun_cfg and ispblk_wbg_tun_cfg:
++ * sophgo/osdrv 1b3a49649d18488ecf54fb4fcb6c27599e433fdc,
++ * interdrv/vi/chip/cv181x/vip/vi_tun_ip_ctrl.c.
++ * 256 samples at i/256, with a separate 4096 endpoint. One LUT feeds R/G/B.
++ */
++static void sg2002_isp_gamma(void __iomem *vi)
++{
++	static const u16 srgb[256] = {
++		0, 203, 347, 452, 539, 613, 679, 739,
++		794, 846, 894, 939, 982, 1023, 1062, 1100,
++		1136, 1171, 1204, 1237, 1268, 1299, 1329, 1358,
++		1386, 1414, 1441, 1467, 1493, 1519, 1543, 1568,
++		1592, 1615, 1638, 1661, 1683, 1705, 1726, 1748,
++		1769, 1789, 1810, 1830, 1849, 1869, 1888, 1907,
++		1926, 1945, 1963, 1981, 1999, 2017, 2034, 2052,
++		2069, 2086, 2102, 2119, 2136, 2152, 2168, 2184,
++		2200, 2216, 2231, 2247, 2262, 2277, 2292, 2307,
++		2322, 2337, 2351, 2366, 2380, 2394, 2408, 2422,
++		2436, 2450, 2464, 2477, 2491, 2504, 2518, 2531,
++		2544, 2557, 2570, 2583, 2596, 2609, 2621, 2634,
++		2646, 2659, 2671, 2683, 2696, 2708, 2720, 2732,
++		2744, 2756, 2767, 2779, 2791, 2802, 2814, 2825,
++		2837, 2848, 2859, 2871, 2882, 2893, 2904, 2915,
++		2926, 2937, 2948, 2959, 2969, 2980, 2991, 3001,
++		3012, 3023, 3033, 3043, 3054, 3064, 3074, 3085,
++		3095, 3105, 3115, 3125, 3135, 3145, 3155, 3165,
++		3175, 3185, 3194, 3204, 3214, 3224, 3233, 3243,
++		3252, 3262, 3271, 3281, 3290, 3300, 3309, 3318,
++		3327, 3337, 3346, 3355, 3364, 3373, 3382, 3391,
++		3400, 3409, 3418, 3427, 3436, 3445, 3454, 3463,
++		3471, 3480, 3489, 3498, 3506, 3515, 3523, 3532,
++		3540, 3549, 3557, 3566, 3574, 3583, 3591, 3600,
++		3608, 3616, 3624, 3633, 3641, 3649, 3657, 3665,
++		3674, 3682, 3690, 3698, 3706, 3714, 3722, 3730,
++		3738, 3746, 3754, 3762, 3769, 3777, 3785, 3793,
++		3801, 3808, 3816, 3824, 3832, 3839, 3847, 3855,
++		3862, 3870, 3877, 3885, 3892, 3900, 3907, 3915,
++		3922, 3930, 3937, 3945, 3952, 3959, 3967, 3974,
++		3981, 3989, 3996, 4003, 4010, 4018, 4025, 4032,
++		4039, 4046, 4054, 4061, 4068, 4075, 4082, 4089,
++	};
++	unsigned int i;
++
++	/* Program bank zero while stopped, broadcasting to all three channels. */
++	writel(BIT(8) | BIT(12), vi + 0x52204);
++	writel(BIT(31), vi + 0x52208);
++	writel(4096, vi + 0x52210);
++	for (i = 0; i < ARRAY_SIZE(srgb); i += 2)
++		writel(srgb[i] | ((u32)srgb[i + 1] << 16) | BIT(31), vi + 0x5220c);
++	writel(0, vi + 0x52204);
++	sg2002_isp_update(vi, 0x52200, BIT(0) | BIT(1), BIT(0) | BIT(1));
++}
++
++/* GC4653 vendor calibration: 256 in the ISP's 12-bit domain. The
++ * sensor's optical-black clamp is not removal of this output pedestal.
++ * Apply once, in BE LE, and recover the remaining signal range (Q10).
++ */
++static void sg2002_isp_black_level(void __iomem *vi)
++{
++	writel(256 | (256 << 16), vi + 0x1980c);
++	writel(256 | (256 << 16), vi + 0x19810);
++	writel(1092 | (1092 << 16), vi + 0x19814);
++	writel(1092 | (1092 << 16), vi + 0x19818);
++	writel(0, vi + 0x19834);
++	writel(0, vi + 0x19838);
++	sg2002_isp_update(vi, 0x19800, BIT(0), 0);
++	sg2002_isp_update(vi, 0x19808, BIT(0), BIT(0));
++}
++
++static void sg2002_isp_set_wb(void __iomem *vi, u32 red, u32 blue)
++{
++	/* Q10 gains; reciprocal gains are Q12, as in vendor isp_wb_ctrl.c. */
++	writel(red | (1024U << 16), vi + 0x40010);
++	writel(blue | (1024U << 16), vi + 0x40014);
++	writel((1024U << 12) / red, vi + 0x40034);
++	writel(1U << 12, vi + 0x40038);
++	writel((1024U << 12) / blue, vi + 0x4003c);
++	sg2002_isp_update(vi, 0x40000, BIT(0), 0);
++	sg2002_isp_update(vi, 0x40008, BIT(0), BIT(0));
++}
++
+ static void sg2002_isp_configure(void __iomem *vi, u32 width, u32 height,
+ 				u32 stride, u32 bayer, dma_addr_t addr)
+ {
+@@ -126,7 +207,6 @@ static void sg2002_isp_configure(void __iomem *vi, u32 width, u32 height,
+ 		{ 0x45000, BIT(0), 0 }, /* RGB CAC */
+ 		{ 0x52024, BIT(2), 0 }, /* CCM0 */
+ 		{ 0x52124, BIT(2), 0 }, /* CCM1 */
+-		{ 0x52200, BIT(0), 0 }, /* RGB gamma */
+ 		{ 0x52300, BIT(0), 0 }, /* Y gamma */
+ 		{ 0x53000, BIT(0) | BIT(1) | BIT(24), BIT(24) }, /* MANR */
+ 		{ 0x5306c, GENMASK(15, 8), GENMASK(15, 8) }, /* MANR DMA */
+@@ -188,6 +268,7 @@ static void sg2002_isp_configure(void __iomem *vi, u32 width, u32 height,
+ 	sg2002_isp_update(vi, ISP_RGB_CTRL, GENMASK(4, 0) | BIT(8),
+ 			   bayer | BIT(8));
+ 	writel(size, vi + ISP_RGB_SIZE);
++	sg2002_isp_gamma(vi);
+ 	/* Full-range BT.601, signed Q10 coefficients and 10-bit offsets.
+ 	 * These are the neutral table emitted by isp_algo_csc_main:
+ 	 *  306  601 117; -173 -339 512; 512 -429 -83; offsets 0,512,512.

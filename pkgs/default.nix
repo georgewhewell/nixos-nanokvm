@@ -671,6 +671,10 @@ in
   picoclaw-lcd-test = final.callPackage ./sg2002/picoclaw-lcd-test { };
   sg2002-c906l-drm-test = final.callPackage ./sg2002/c906l-drm-test { };
   sg2002-h264-bridge = final.callPackage ./sg2002/h264-bridge { };
+  sg2002-h264-bridge-detection = cross.callPackage ./sg2002/h264-bridge {
+    enableDetection = true;
+    sophgo-cviruntime = final.sg2002-cviruntime;
+  };
   # Separate test derivation: the shared source enables ALSA/PCMA only here;
   # the normal bridge has neither an ALSA header nor a library dependency.
   sg2002-h264-bridge-pcma = final.callPackage ./sg2002/h264-bridge {
