@@ -27,6 +27,7 @@ struct sg2002_detection {
 	unsigned int width, height, stride, coded_height, resized_w, resized_h;
 	unsigned int fps;
 	int cy, rv, gu, gv, bu, offset;
+	uint8_t to_srgb[256];
 	uint8_t *snapshot;
 	struct box *candidates;
 	pthread_t thread;
@@ -62,6 +63,24 @@ static uint64_t milliseconds(void)
 static uint8_t clip(int value)
 {
 	return (uint8_t)(value < 0 ? 0 : value > 255 ? 255 : value);
+}
+
+static int input_transfer(struct sg2002_detection *d, unsigned int transfer)
+{
+	if (transfer != V4L2_XFER_FUNC_NONE && transfer != V4L2_XFER_FUNC_SRGB &&
+	    transfer != V4L2_XFER_FUNC_709) return -1;
+	/* The fixed camera ISP bypasses gamma. Restore the sRGB transfer used
+	 * by the model's photo inputs, after YUV -> RGB. V4L2 transfer formulas:
+	 * Documentation/userspace-api/media/v4l/colorspaces-details.rst */
+	for (unsigned int i = 0; i < 256; i++) {
+		float value = (float)i / 255.0f;
+		if (transfer == V4L2_XFER_FUNC_709)
+			value = value < 0.081f ? value / 4.5f : powf((value + 0.099f) / 1.099f, 1.0f / 0.45f);
+		if (transfer != V4L2_XFER_FUNC_SRGB)
+			value = value <= 0.0031308f ? 12.92f * value : 1.055f * powf(value, 1.0f / 2.4f) - 0.055f;
+		d->to_srgb[i] = clip((int)lroundf(value * 255.0f));
+	}
+	return 0;
 }
 
 /* Bilinear sampling in pixel-centre coordinates, with edge replication.
@@ -104,9 +123,9 @@ static void prepare_input(struct sg2002_detection *d)
 			int v = sample(uv + 1, d->width / 2, d->height / 2, d->width, 2, sx / 2, sy / 2) - 128;
 			unsigned int pos = (y + top) * MODEL_SIZE + x + left;
 			int base = (luma - d->offset) * d->cy;
-			rgb[pos] = clip((base + d->rv * v + 8192) >> 14);
-			rgb[plane + pos] = clip((base - d->gu * u - d->gv * v + 8192) >> 14);
-			rgb[2 * plane + pos] = clip((base + d->bu * u + 8192) >> 14);
+			rgb[pos] = d->to_srgb[clip((base + d->rv * v + 8192) >> 14)];
+			rgb[plane + pos] = d->to_srgb[clip((base - d->gu * u - d->gv * v + 8192) >> 14)];
+			rgb[2 * plane + pos] = d->to_srgb[clip((base + d->bu * u + 8192) >> 14)];
 		}
 	}
 }
@@ -298,6 +317,12 @@ struct sg2002_detection *sg2002_detection_open(const char *model,
 	if (!d->resized_w || !d->resized_h) goto fail;
 	unsigned int encoding = format->ycbcr_enc;
 	unsigned int range = format->quantization;
+	unsigned int transfer = format->xfer_func;
+	if (transfer == V4L2_XFER_FUNC_DEFAULT) transfer = V4L2_MAP_XFER_FUNC_DEFAULT(format->colorspace);
+	if (input_transfer(d, transfer)) {
+		fprintf(stderr, "detection: unsupported input transfer function\n");
+		goto fail;
+	}
 	if (encoding == V4L2_YCBCR_ENC_DEFAULT) encoding = V4L2_MAP_YCBCR_ENC_DEFAULT(format->colorspace);
 	if (range == V4L2_QUANTIZATION_DEFAULT) range = V4L2_MAP_QUANTIZATION_DEFAULT(0, format->colorspace, encoding);
 	if ((encoding != V4L2_YCBCR_ENC_601 && encoding != V4L2_YCBCR_ENC_709) ||

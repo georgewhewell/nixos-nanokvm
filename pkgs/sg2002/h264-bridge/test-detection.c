@@ -40,6 +40,7 @@ static void input_colours(void)
 		.resized_w = 640, .resized_h = 320, .input = &input,
 		.snapshot = snapshot, .cy = 16384, .rv = 22970,
 		.gu = 5638, .gv = 11700, .bu = 29032 };
+	assert(!input_transfer(&d, V4L2_XFER_FUNC_SRGB));
 	/* Full-range BT.601 red, including the first/last interpolated pixels. */
 	memset(snapshot, 76, 32);
 	for (size_t i = 32; i < sizeof(snapshot); i += 2) {
@@ -68,6 +69,16 @@ static void input_colours(void)
 		prepare_input(&d);
 		assert(input.sys_mem[320 * 640 + 320] == (white ? 255 : 0));
 	}
+	/* Linear camera grey must reach the model as sRGB, not dark linear RGB. */
+	d.cy = 16384; d.offset = 0;
+	memset(snapshot, 128, sizeof(snapshot));
+	assert(!input_transfer(&d, V4L2_XFER_FUNC_NONE));
+	prepare_input(&d);
+	assert(input.sys_mem[320 * 640 + 320] == 188);
+	assert(d.to_srgb[0] == 0 && d.to_srgb[255] == 255);
+	assert(!input_transfer(&d, V4L2_XFER_FUNC_709));
+	assert(d.to_srgb[128] == 140);
+	assert(input_transfer(&d, V4L2_XFER_FUNC_SMPTE2084) == -1);
 	free(input.sys_mem);
 }
 
