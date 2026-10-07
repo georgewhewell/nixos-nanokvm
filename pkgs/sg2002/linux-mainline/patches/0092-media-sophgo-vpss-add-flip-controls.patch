@@ -1,0 +1,163 @@
+From: George Whewell <george@whewell.io>
+Subject: [PATCH] media: sophgo: vpss: add per-context flip controls
+
+Expose standard HFLIP/VFLIP controls through each mem2mem file handle.
+Cache controls without touching gated registers and snapshot the mask under
+the job lock. Program ODMA bits 16/17 with the rest of the job, preserving
+format and burst configuration. Sophgo's sclr_odma_set_cfg and
+sclr_flip_mode describe these bits:
+https://github.com/sophgo/osdrv/blob/1b3a49649d18488ecf54fb4fcb6c27599e433fdc/interdrv/vpss/chip/cv181x/scaler.c
+https://github.com/sophgo/osdrv/blob/1b3a49649d18488ecf54fb4fcb6c27599e433fdc/interdrv/vpss/chip/cv181x/scaler.h
+
+ODMA dimensions remain the visible crop; the chroma base remains after the
+coded luma surface. A 640x360 image in a 640x368 surface therefore flips
+360 rows without moving the eight padding rows into the visible image.
+
+diff --git a/drivers/media/platform/sophgo/sg2002-vpss.c b/drivers/media/platform/sophgo/sg2002-vpss.c
+index 01b437f..278f6f7 100644
+--- a/drivers/media/platform/sophgo/sg2002-vpss.c
++++ b/drivers/media/platform/sophgo/sg2002-vpss.c
+@@ -31,6 +31,7 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/slab.h>
+ 
++#include <media/v4l2-ctrls.h>
+ #include <media/v4l2-device.h>
+ #include <media/v4l2-ioctl.h>
+ #include <media/v4l2-mem2mem.h>
+@@ -94,6 +95,8 @@
+ 
+ /* ODMA (core + 0xc00) */
+ #define ODMA_CFG		(SC_BASE + 0xc00) /* bit16.. flip, bit8..14 fmt, bit0..3 burst */
++#define  ODMA_HFLIP		BIT(16)
++#define  ODMA_VFLIP		BIT(17)
+ #define ODMA_ADDR0_L		(SC_BASE + 0xc04)
+ #define ODMA_ADDR1_L		(SC_BASE + 0xc0c)
+ #define ODMA_ADDR2_L		(SC_BASE + 0xc14)
+@@ -176,6 +179,8 @@ struct vpss_dev {
+ 
+ struct vpss_ctx {
+ 	struct v4l2_fh		fh;
++	struct v4l2_ctrl_handler	ctrl_handler;
++	u32			flip;	/* ODMA bits, guarded by irq_lock */
+ 	struct vpss_dev		*dev;
+ 	/* Indexed by enum v4l2_buf_type: CAPTURE is 1, OUTPUT is 2. */
+ 	struct vpss_q_data	q_data[V4L2_BUF_TYPE_VIDEO_OUTPUT + 1];
+@@ -322,7 +327,7 @@ static void vpss_hw_init(struct vpss_dev *vpss)
+ }
+ 
+ static void vpss_job_hw(struct vpss_dev *vpss, struct vpss_ctx *ctx,
+-			dma_addr_t src, dma_addr_t dst)
++			dma_addr_t src, dma_addr_t dst, u32 flip)
+ {
+ 	struct vpss_q_data *q_in = &ctx->q_data[V4L2_BUF_TYPE_VIDEO_OUTPUT];
+ 	struct vpss_q_data *q_out = &ctx->q_data[V4L2_BUF_TYPE_VIDEO_CAPTURE];
+@@ -376,8 +381,10 @@ static void vpss_job_hw(struct vpss_dev *vpss, struct vpss_ctx *ctx,
+ 	vpss_write(vpss, CSC_OFFSET, 0);
+ 	vpss_write(vpss, CSC_EN, BIT(0) | BIT(8));
+ 
+-	/* ODMA */
+-	vpss_write(vpss, ODMA_CFG, (q_out->fmt->hw_fmt << 8) | IMG_BURST_DEFAULT);
++	/* Flip the visible image, not the coded-height padding. The UV plane
++	 * still starts after the complete coded luma surface below. */
++	vpss_write(vpss, ODMA_CFG,
++		   flip | (q_out->fmt->hw_fmt << 8) | IMG_BURST_DEFAULT);
+ 	vpss_write(vpss, ODMA_OFFSET_X, 0);
+ 	vpss_write(vpss, ODMA_OFFSET_Y, 0);
+ 	vpss_write(vpss, ODMA_WIDTH, dw - 1);
+@@ -786,6 +793,7 @@ static void vpss_device_run(void *priv)
+ 	struct vpss_q_data *q_in = &ctx->q_data[V4L2_BUF_TYPE_VIDEO_OUTPUT];
+ 	struct vpss_q_data *q_out = &ctx->q_data[V4L2_BUF_TYPE_VIDEO_CAPTURE];
+ 	unsigned long flags;
++	u32 flip;
+ 
+ 	src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
+ 	dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
+@@ -822,6 +830,7 @@ static void vpss_device_run(void *priv)
+ 	dst = v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
+ 
+ 	spin_lock_irqsave(&vpss->irq_lock, flags);
++	flip = ctx->flip;
+ 	vpss->curr = ctx;
+ 	vpss->curr_src = src;
+ 	vpss->curr_dst = dst;
+@@ -831,7 +840,7 @@ static void vpss_device_run(void *priv)
+ 
+ 	vpss_job_hw(vpss, ctx,
+ 		    vb2_dma_contig_plane_dma_addr(&src->vb2_buf, 0),
+-		    vb2_dma_contig_plane_dma_addr(&dst->vb2_buf, 0));
++		    vb2_dma_contig_plane_dma_addr(&dst->vb2_buf, 0), flip);
+ }
+ 
+ static int vpss_job_ready(void *priv)
+@@ -884,6 +893,36 @@ static irqreturn_t vpss_isr(int irq, void *data)
+ 
+ /* ------------------------------------------------------------------ */
+ 
++static int vpss_s_ctrl(struct v4l2_ctrl *ctrl)
++{
++	struct vpss_ctx *ctx = container_of(ctrl->handler, struct vpss_ctx,
++					  ctrl_handler);
++	unsigned long flags;
++	u32 bit;
++
++	switch (ctrl->id) {
++	case V4L2_CID_HFLIP:
++		bit = ODMA_HFLIP;
++		break;
++	case V4L2_CID_VFLIP:
++		bit = ODMA_VFLIP;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	/* Cache only. device_run snapshots this mask for the next job, so a
++	 * control change cannot rewrite an in-flight job or touch gated MMIO. */
++	spin_lock_irqsave(&ctx->dev->irq_lock, flags);
++	ctx->flip = (ctx->flip & ~bit) | (ctrl->val ? bit : 0);
++	spin_unlock_irqrestore(&ctx->dev->irq_lock, flags);
++	return 0;
++}
++
++static const struct v4l2_ctrl_ops vpss_ctrl_ops = {
++	.s_ctrl = vpss_s_ctrl,
++};
++
+ static int vpss_open(struct file *file)
+ {
+ 	struct vpss_dev *vpss = video_drvdata(file);
+@@ -904,6 +943,17 @@ static int vpss_open(struct file *file)
+ 	file->private_data = ctx;
+ 	v4l2_fh_add(&ctx->fh, file);
+ 
++	v4l2_ctrl_handler_init(&ctx->ctrl_handler, 2);
++	v4l2_ctrl_new_std(&ctx->ctrl_handler, &vpss_ctrl_ops,
++			  V4L2_CID_HFLIP, 0, 1, 1, 0);
++	v4l2_ctrl_new_std(&ctx->ctrl_handler, &vpss_ctrl_ops,
++			  V4L2_CID_VFLIP, 0, 1, 1, 0);
++	if (ctx->ctrl_handler.error) {
++		ret = ctx->ctrl_handler.error;
++		goto err_fh;
++	}
++	ctx->fh.ctrl_handler = &ctx->ctrl_handler;
++
+ 	ctx->fh.m2m_ctx = v4l2_m2m_ctx_init(vpss->m2m_dev, ctx,
+ 					    vpss_queue_init);
+ 	if (IS_ERR(ctx->fh.m2m_ctx)) {
+@@ -931,6 +981,7 @@ static int vpss_open(struct file *file)
+ 	return 0;
+ 
+ err_fh:
++	v4l2_ctrl_handler_free(&ctx->ctrl_handler);
+ 	v4l2_fh_del(&ctx->fh, file);
+ 	v4l2_fh_exit(&ctx->fh);
+ 	kfree(ctx);
+@@ -942,6 +993,7 @@ static int vpss_release(struct file *file)
+ 	struct vpss_ctx *ctx = file->private_data;
+ 
+ 	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
++	v4l2_ctrl_handler_free(&ctx->ctrl_handler);
+ 	v4l2_fh_del(&ctx->fh, file);
+ 	v4l2_fh_exit(&ctx->fh);
+ 	kfree(ctx);

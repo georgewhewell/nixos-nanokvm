@@ -373,6 +373,10 @@ let
       name = "media-sophgo-sg2002-vpss-no-register-access-with-clocks-off";
       patch = ./patches/0081-media-sophgo-SG2002-VPSS-no-register-access-with-clocks-off.patch;
     })
+    (patch {
+      name = "media-sophgo-vpss-flip-controls";
+      patch = ./patches/0092-media-sophgo-vpss-add-flip-controls.patch;
+    })
   ];
 
   meta = {
@@ -478,6 +482,12 @@ let
       upstreamStatus = "draft";
       dropWhen = "CV18xx uses sdhci_set_power_and_bus_voltage upstream";
       notes = "Preserve SDHCI voltage-selection bits when C906L mediates PicoClaw Wi-Fi power through vmmc.";
+    };
+    "media-sophgo-vpss-flip-controls" = {
+      origin = "local; ODMA flip bits documented by sophgo/osdrv sg200x-dev";
+      upstreamStatus = "draft";
+      dropWhen = "Folded into the SG2002 VPSS driver before submission";
+      notes = "Per-file HFLIP/VFLIP controls applied by output DMA to the visible crop, preserving coded-height padding.";
     };
     "media-sophgo-align-vpss-format-enumeration" = {
       origin = "local";
