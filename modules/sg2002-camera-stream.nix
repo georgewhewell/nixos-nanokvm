@@ -15,6 +15,7 @@ let
     "--bitrate" (toString cfg.bitrate) "--gop" "30"
     "--rtsp" cfg.rtspUrl
   ] ++ lib.optionals (cfg.size == "half") [ "--size" "half" ]
+    ++ lib.optionals (cfg.rotation == 180) [ "--rotate" "180" ]
     ++ lib.optionals cfg.detection.enable [
       "--detect-model" (toString cfg.detection.model)
       "--detect-fps" (toString cfg.detection.framesPerSecond)
@@ -36,6 +37,11 @@ in {
       type = lib.types.ints.between 1 60;
       default = 30;
       description = "Maximum video frame rate.";
+    };
+    rotation = lib.mkOption {
+      type = lib.types.enum [ 0 180 ];
+      default = 0;
+      description = "Rotate the image in hardware before detection and encoding.";
     };
     bitrate = lib.mkOption {
       type = lib.types.ints.positive;

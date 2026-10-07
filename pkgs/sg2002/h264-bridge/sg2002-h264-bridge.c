@@ -1639,6 +1639,7 @@ struct bridge_options {
 	unsigned int mid_buffers;
 	unsigned int capture_buffers;
 	unsigned int frame_limit;
+	unsigned int rotation;
 	int half_scale;
 	int use_isp;
 	int mid_heap_reserved;
@@ -1724,6 +1725,19 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 	if (scaler_fd < 0) {
 		die_errno(opts->scaler_path);
 		goto out;
+	}
+	if (opts->rotation == 180) {
+		struct v4l2_ext_control controls[] = {
+			{ .id = V4L2_CID_HFLIP, .value = 1 },
+			{ .id = V4L2_CID_VFLIP, .value = 1 },
+		};
+		struct v4l2_ext_controls list = {
+			.count = 2, .controls = controls,
+		};
+		if (xioctl(scaler_fd, VIDIOC_S_EXT_CTRLS, &list)) {
+			die_errno("VPSS hardware rotation");
+			goto out;
+		}
 	}
 	if (opts->output_path) {
 		if (!strcmp(opts->output_path, "-"))
@@ -2267,6 +2281,7 @@ static void usage(const char *program)
 		"  --scaler-node PATH   VPSS mem2mem node (default " DEFAULT_SCALER ")\n"
 		"  --isp               select hardware Bayer->NV21 capture and VPSS->NV12;\n"
 		"                       quarter size (640x360 on GC4653), or --size half\n"
+		"  --rotate 0|180      rotate in VPSS before detection and encoding\n"
 		"  --frames N          stop after N encoded live frames, excluding the one\n"
 		"                       priming picture retained in the stream (default unlimited)\n"
 		"  --mid-buffers N      shared scaler/encoder buffers (default 4)\n"
@@ -2348,6 +2363,10 @@ int main(int argc, char **argv)
 				goto bad_usage;
 		} else if (!strcmp(arg, "--isp")) {
 			opts.use_isp = 1;
+		} else if (!strcmp(arg, "--rotate") && i + 1 < argc) {
+			if (parse_u32(argv[++i], &opts.rotation) ||
+			    (opts.rotation != 0 && opts.rotation != 180))
+				goto bad_usage;
 		} else if (!strcmp(arg, "--frames") && i + 1 < argc) {
 			if (parse_u32(argv[++i], &opts.frame_limit) || !opts.frame_limit)
 				goto bad_usage;
