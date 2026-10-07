@@ -14,7 +14,8 @@ let
     "--max-fps" (toString cfg.framesPerSecond)
     "--bitrate" (toString cfg.bitrate) "--gop" "30"
     "--rtsp" cfg.rtspUrl
-  ] ++ lib.optionals (cfg.size == "half") [ "--size" "half" ]
+  ] ++ lib.optionals cfg.autoAdjust [ "--auto-camera" "--mains-frequency" (toString cfg.powerLineFrequency) ]
+    ++ lib.optionals (cfg.size == "half") [ "--size" "half" ]
     ++ lib.optionals (cfg.rotation == 180) [ "--rotate" "180" ]
     ++ lib.optionals cfg.detection.enable [
       "--detect-model" (toString cfg.detection.model)
@@ -37,6 +38,16 @@ in {
       type = lib.types.ints.between 1 60;
       default = 30;
       description = "Maximum video frame rate.";
+    };
+    autoAdjust = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Adjust GC4653 exposure and ISP white balance from sampled frames.";
+    };
+    powerLineFrequency = lib.mkOption {
+      type = lib.types.enum [ 0 50 60 ];
+      default = 50;
+      description = "Lighting mains frequency for exposure flicker reduction; 0 disables quantisation.";
     };
     rotation = lib.mkOption {
       type = lib.types.enum [ 0 180 ];
@@ -83,7 +94,7 @@ in {
       preStart = ''
         for attempt in {1..180}; do
           ready=1
-          for node in ${lib.escapeShellArgs (nodes ++ lib.optional cfg.detection.enable "/dev/sg2002-tpu")}; do
+          for node in ${lib.escapeShellArgs (nodes ++ lib.optional cfg.autoAdjust "/dev/v4l-subdev0" ++ lib.optional cfg.detection.enable "/dev/sg2002-tpu")}; do
             [[ -c "$node" ]] || ready=0
           done
           [[ "$ready" == 1 ]] && exit 0

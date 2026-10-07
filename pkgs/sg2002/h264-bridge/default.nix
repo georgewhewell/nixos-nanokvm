@@ -17,7 +17,7 @@ stdenv.mkDerivation {
     $CC -std=c11 -O2 -Wall -Wextra -Wconversion -Wshadow -Wformat=2 \
       -Werror ${lib.optionalString enablePcma "-DENABLE_PCMA=1"} \
       ${lib.optionalString enableDetection "-DENABLE_DETECTION=1 -I${./.} ${./detection.c}"} \
-      -o sg2002-h264-bridge $src ${lib.optionalString enablePcma "-pthread -lasound"} \
+      -I${./.} ${./camera-auto.c} -o sg2002-h264-bridge $src -lm ${lib.optionalString enablePcma "-pthread -lasound"} \
       ${lib.optionalString enableDetection "-pthread -lcviruntime -lm"}
     runHook postBuild
   '';

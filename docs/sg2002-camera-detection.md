@@ -1,4 +1,4 @@
-# Camera object detection
+# Camera streaming and object detection
 
 The optional detector samples NV12 frames from the hardware camera/VPSS path,
 runs YOLOv5n on the TPU, and draws boxes, COCO labels and confidence scores into
@@ -34,7 +34,7 @@ nix build .#sg2002-h264-bridge-detection -o result-bridge
 nix build .#sg2002-tpu-yolov5n -o result-model
 # On the board, after copying both closures:
 sudo ./result-bridge/bin/sg2002-h264-bridge \
-  --isp --capture-buffers 2 --mid-buffers 2 --max-fps 30 \
+  --isp --auto-camera --capture-buffers 2 --mid-buffers 2 --max-fps 30 \
   --detect-model ./result-model/yolov5n.cvimodel --detect-fps 2 \
   --rtsp rtsp://video-server:8554/licheerv
 ```
@@ -58,42 +58,71 @@ YOLOv5 confidence/NMS defaults are 0.25/0.45. Scores are shown because a visible
 box is not an accuracy guarantee. Inference failures fail the publisher rather
 than leaving stale boxes or silently substituting CPU inference.
 
-Hardware validation on the GC4653 board connected to strix-4 (2026-10-07),
-with sensor analogue gain manually raised to 32× for the live detection runs:
+The camera module enables automatic exposure and white balance by default.
+The bridge meters a 32×24 grid from the clean VPSS output five times per second,
+undoes the sRGB transfer for its calculations, and controls GC4653 shutter/gain
+and the ISP's standard V4L2 red/blue balance controls. It does not copy or convert
+the entire video frame for metering. Exposure stays within the configured frame
+interval; a very dark scene reaches the gain limit rather than slowing the video.
 
-- A 180-second RTSP recording contained 5,329 decodable 640x360 frames
-  (29.6 fps), with no strict FFmpeg decode errors or service restarts.
-- The TPU completed 358 samples in 181.3 seconds (1.98/s). Preprocessing,
-  inference and postprocessing averaged about 326 ms per sample. Service CPU
-  was 60% of the single core; process RSS stayed at 18,780 KiB. Approximately
-  37 MiB remained available on the RAM-booted system.
-- A separate 1280x720 test completed 300 live frames plus the priming picture,
-  all decoded successfully, at 29.4–29.8 fps. This was a short smoke test.
+`powerLineFrequency` defaults to 50 Hz; use 60 for 60 Hz lighting, or 0 to disable
+shutter quantisation. Long exposures use complete lighting periods, with gain
+covering the gaps between shutter steps. `autoAdjust = false` leaves sensor and
+white-balance controls available for manual adjustment. Do not run another
+exposure controller against the same devices while automatic adjustment is on.
+
+The kernel removes the GC4653's fixed black pedestal in the BE ISP stage, applies
+adjustable white balance and a hardware sRGB gamma table, then converts to
+full-range BT.601 NV21. VPSS scales/rotates it into NV12. Coda now writes the
+negotiated range, transfer and colour matrix into the H.264 SPS, so players do
+not have to guess the colour interpretation. The Coda980 firmware uses a
+different bitrate register from Coda960; programming that register enables
+its CBR mode instead of silently encoding at a fixed quantiser. Firmware CBR
+currently undershoots the requested target: the tested 720p scene produced
+0.61 Mbit/s at a 2 Mbit/s setting, and 2.23 Mbit/s at 8 Mbit/s. Do not treat the
+setting as an exact achieved rate.
+
+This is a basic automatic camera pipeline, not the vendor's complete calibrated
+image-quality stack. Black-level correction uses the fixed 256/4096 calibration;
+the vendor's gain-dependent calibration differs slightly at high gain. White
+balance needs sufficiently neutral pixels and holds its gains when none are
+available. Lens-shading correction, a calibrated colour matrix, noise reduction,
+HDR and sharpening remain disabled. The GC4653 module has a manually adjustable
+lens and no supported autofocus actuator; exposure and gamma cannot correct
+optical blur.
+
+Hardware validation on the GC4653 board connected to strix-4 (2026-10-07):
+
+- With AE/AWB and a 2 Hz detection limit (measured 1.94 samples/s), a 60-second 1280x720 RTSP
+  recording decoded 1,755 frames without errors. The running publisher reported
+  about 29.6 fps; service CPU averaged 65.1%, RSS stayed at 20,244 KiB, and there
+  were no restarts. A separate 30-second test at the higher bitrate decoded
+  868 frames without errors.
+- The final 640x360 smoke test encoded and decoded 300 live frames plus
+  the priming picture, with full-range sRGB tags and no decode errors.
+- Before correcting rate control, the same 720p scene produced 26.7 Mbit/s,
+  decoded only 1,221 frames in 60 seconds and consumed 91% CPU.
+- At minimum shutter and 1× gain, encoded black luma measured 0–2 (mean
+  0.047/255), compared with a solid 73 when correction was in the FE stage.
+- Controlled bright/dim steps using the living-room lights exercised automatic
+  gain changes without extending the 30 fps sensor frame interval. The original
+  lamp settings and Adaptive Lighting control were restored after testing.
+- The live image is visibly brighter and has corrected blacks, but remains
+  soft. The model sometimes labels most of this scene as a person at low
+  confidence; reliable live recognition is still unverified.
 - An injected NV12 fixture of the vendor dog/bicycle/car photo exercised the
-  actual TPU, overlay writes and Coda encoder. The decoded output showed dog
-  0.70, bicycle 0.48 and car 0.55 with correctly positioned boxes and labels.
-  This is a controlled pipeline test, not a live-scene accuracy result.
-- Booted the rebased kernel with VPSS flip controls and decoded all 601
-  pictures of a rotated camera run (29.5–29.8 fps, 67% process CPU while also
-  saving H.264 and publishing RTSP). The image is upright with no padding band.
-  A 640x360 fixture in a 640x368 surface verified exact luma reversal for
-  all four flip modes and untouched padding. Uniform Y/U/V values were
-  byte-exact; image chroma differed slightly from a software flip (maximum
-  10 code values, mean absolute difference below 0.085), without a plane swap.
-- Repeated stop/start and the service's device restrictions worked. The
-  existing ISP partial-frame reset message still appears during streamoff.
-
-The polling fix avoids waiting on an empty VPSS queue, which returns POLLERR
-immediately. Camera-only process CPU fell from 55% to 4% at approximately
-30 fps. Detection remains substantial CPU work despite TPU acceleration,
-including input conversion and the runtime's output conversion.
-
-The fixed ISP does not implement automatic exposure or white balance. The
-current live image is dim and soft, and the model returns no detections in
-that scene. Live recognition remains unverified; the fixture results do not
-remove that limitation.
+  actual TPU, overlay writes and Coda encoder. Decoded boxes showed dog 0.70,
+  bicycle 0.48 and car 0.55. This establishes pipeline operation, not live-scene
+  detection accuracy.
+- A 640x360 fixture in a 640x368 surface verified exact luma reversal for all
+  four VPSS flip modes and untouched padding. Uniform Y/U/V values were exact;
+  image chroma differed slightly from a software flip (maximum 10 code values,
+  mean absolute difference below 0.085), without a plane swap.
+- Repeated stop/start and the service's device restrictions worked. The existing
+  ISP partial-frame reset message still appears during streamoff.
 
 Host tests run under AddressSanitizer and UndefinedBehaviorSanitizer. They check
-NV12 colour/range/transfer conversion, letterboxing, padded chroma offsets and
-stride guards, confidence/NMS, sampling before overlay, busy-snapshot ownership,
-stale results and failure-state handling.
+AE/AWB convergence and bounds, neutral-sample rejection, metering of padded DMA
+surfaces, gamma LUT programming, black-level/WB registers, NV12 colour conversion,
+letterboxing, confidence/NMS, sampling before overlays, snapshot ownership and
+stale/failing inference handling.
