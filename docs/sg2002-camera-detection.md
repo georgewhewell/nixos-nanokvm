@@ -58,7 +58,8 @@ YOLOv5 confidence/NMS defaults are 0.25/0.45. Scores are shown because a visible
 box is not an accuracy guarantee. Inference failures fail the publisher rather
 than leaving stale boxes or silently substituting CPU inference.
 
-Hardware validation on the GC4653 board connected to strix-4 (2026-10-07):
+Hardware validation on the GC4653 board connected to strix-4 (2026-10-07),
+with sensor analogue gain manually raised to 32× for the live detection runs:
 
 - A 180-second RTSP recording contained 5,329 decodable 640x360 frames
   (29.6 fps), with no strict FFmpeg decode errors or service restarts.
@@ -72,6 +73,13 @@ Hardware validation on the GC4653 board connected to strix-4 (2026-10-07):
   actual TPU, overlay writes and Coda encoder. The decoded output showed dog
   0.70, bicycle 0.48 and car 0.55 with correctly positioned boxes and labels.
   This is a controlled pipeline test, not a live-scene accuracy result.
+- Booted the rebased kernel with VPSS flip controls and decoded all 601
+  pictures of a rotated camera run (29.5–29.8 fps, 67% process CPU while also
+  saving H.264 and publishing RTSP). The image is upright with no padding band.
+  A 640x360 fixture in a 640x368 surface verified exact luma reversal for
+  all four flip modes and untouched padding. Uniform Y/U/V values were
+  byte-exact; image chroma differed slightly from a software flip (maximum
+  10 code values, mean absolute difference below 0.085), without a plane swap.
 - Repeated stop/start and the service's device restrictions worked. The
   existing ISP partial-frame reset message still appears during streamoff.
 
@@ -81,8 +89,9 @@ immediately. Camera-only process CPU fell from 55% to 4% at approximately
 including input conversion and the runtime's output conversion.
 
 The fixed ISP does not implement automatic exposure or white balance. The
-current live scene is dim, and live object accuracy still needs a suitable
-scene. The fixture results do not remove that limitation.
+current live image is dim and soft, and the model returns no detections in
+that scene. Live recognition remains unverified; the fixture results do not
+remove that limitation.
 
 Host tests run under AddressSanitizer and UndefinedBehaviorSanitizer. They check
 NV12 colour/range/transfer conversion, letterboxing, padded chroma offsets and
