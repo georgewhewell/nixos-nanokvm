@@ -2182,9 +2182,17 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 			}
 		}
 		if (!progress) {
+			int scaler_pending = 0;
+			for (i = 0; i < mid.count; i++)
+				scaler_pending |= mid_state[i] == MID_AT_VPSS;
+			/* An empty mem2mem queue reports POLLERR immediately. Only
+			 * wait on VPSS while it owns a buffer, and on capture while
+			 * we can dequeue its next frame. */
 			struct pollfd fds[3] = {
-				{ .fd = capture_fd, .events = POLLIN },
-				{ .fd = scaler_fd, .events = POLLIN | POLLOUT },
+				{ .fd = held_capture == UINT32_MAX ? capture_fd : -1,
+				  .events = POLLIN },
+				{ .fd = scaler_pending ? scaler_fd : -1,
+				  .events = POLLIN | POLLOUT },
 				{ .fd = encoder_fd, .events = POLLIN | POLLOUT },
 			};
 			if (poll(fds, 3,
