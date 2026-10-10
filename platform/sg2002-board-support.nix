@@ -14,6 +14,31 @@
   ...
 }: let
   cfg = config.sg2002;
+  udevTriggerDevices = [
+    ""
+    "-udevadm trigger --type=devices --action=add --prioritized-subsystem=block,tpmrm,net,tty,input"
+  ];
+
+  # Device classes something at boot waits on: mounts, links, logins, sound,
+  # and every bus whose modalias loads a driver.
+  udevEarlySubsystems = [
+    "block" "net" "ieee80211" "rfkill" "misc" "input" "sound"
+    "platform" "mmc" "sdio" "spi" "i2c" "usb" "udc" "gadget"
+    "remoteproc" "rpmsg" "virtio"
+    "drm" "graphics" "backlight" "watchdog" "rtc"
+  ];
+  udevTrigger = "udevadm trigger --type=devices --action=add";
+  udevSubsystemFlags = flag:
+    lib.concatMapStringsSep " " (s: "--subsystem-${flag}=${s}") udevEarlySubsystems;
+  # Serial and control terminals; the 63 virtual-console nodes can wait.
+  udevEarlyTtys =
+    "--subsystem-match=tty --sysname-match=tty[!0-9]* --sysname-match=tty"
+    + " --sysname-match=console --sysname-match=ptmx";
+  udevTriggerEarly = [
+    ""
+    "-${udevTrigger} --prioritized-subsystem=block,net,input ${udevSubsystemFlags "match"}"
+    "-${udevTrigger} ${udevEarlyTtys}"
+  ];
 
   kernelPkg =
     if cfg.kernel == "mainline" && cfg.bluetooth.enable
@@ -302,6 +327,36 @@ in {
       networking.useNetworkd = true;
       networking.useDHCP = false;
       networking.firewall.enable = false;
+    }
+
+    {
+      # Coldplug devices only. Replaying add events for every bus, driver
+      # and module costs about 6 s of this single core in each of the two
+      # passes, and the stock rules use none of them here.
+      boot.initrd.systemd.services.systemd-udev-trigger.serviceConfig.ExecStart = udevTriggerDevices;
+
+      # Stage 2 replays in two steps. A device that appears during boot is
+      # queued behind the whole replay, so the Wi-Fi card waited for some
+      # 200 events that nothing depends on. Those now follow once
+      # multi-user.target is reached.
+      systemd.services.systemd-udev-trigger.serviceConfig.ExecStart = udevTriggerEarly;
+      systemd.services.sg2002-udev-coldplug-rest = {
+        description = "Coldplug the remaining udev devices";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "multi-user.target" ];
+        conflicts = [ "shutdown.target" ];
+        before = [ "shutdown.target" ];
+        # Without this the target orders itself after its wants: a cycle.
+        unitConfig.DefaultDependencies = false;
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = [
+            "${config.systemd.package}/bin/${udevTrigger} ${udevSubsystemFlags "nomatch"} --subsystem-nomatch=tty"
+            "${config.systemd.package}/bin/${udevTrigger} --subsystem-match=tty --sysname-match=tty[0-9]*"
+          ];
+        };
+      };
     }
 
     (lib.mkIf cfg.initrd.pruneKernelModules {
