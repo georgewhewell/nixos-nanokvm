@@ -78,6 +78,7 @@ with lib.kernel; {
   USB_CONFIGFS_SERIAL = yes;
   USB_CONFIGFS_RNDIS = yes;
   USB_CONFIGFS_NCM = yes; # for boards.<...>.live.usb-ncm
+  USB_CONFIGFS_F_HID = yes; # sg2002.usbGadget.hid: KVM keyboard/mouse
   USB_F_ECM = yes;
   USB_F_ACM = yes;
   USB_F_SERIAL = yes;
