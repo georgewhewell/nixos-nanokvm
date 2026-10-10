@@ -133,6 +133,16 @@ in {
         default = null;
         description = "wpa_supplicant.conf body; null disables the supplicant.";
       };
+      loadDriverAtBoot = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Whether systemd-modules-load inserts aic8800_fdrv. Its insert powers
+          the chip and waits 2 s for the SDIO card, then fails if none came.
+          Disable this where something loaded later supplies that power; udev
+          then loads the driver from the card's modalias once it enumerates.
+        '';
+      };
       wpaConfRuntimePath = mkOption {
         type = types.nullOr types.str;
         default = null;
@@ -246,9 +256,8 @@ in {
         ++ lib.optionals cfg.bluetooth.enable [ "bluetooth" "bnep" "rfcomm" ]
         ++ lib.optionals (aic8800Pkg != null) [
           "aic8800_bsp"
-          "aic8800_fdrv"
           "aic8800_btlpm"
-        ];
+        ] ++ lib.optional (aic8800Pkg != null && cfg.wifi.loadDriverAtBoot) "aic8800_fdrv";
       # systemd-modules-load remains active across switch-root and therefore
       # does not replay boot.kernelModules in stage 2.  A pruned SD initrd must
       # carry and load the WiFi stack itself; otherwise /dev/rfkill and wlan0
@@ -275,9 +284,9 @@ in {
           ++ lib.optionals cfg.bluetooth.enable [ "bluetooth" "bnep" ]
           ++ [
             "aic8800_bsp"
-            "aic8800_fdrv"
             "aic8800_btlpm"
           ]
+          ++ lib.optional cfg.wifi.loadDriverAtBoot "aic8800_fdrv"
         );
       hardware.firmware = lib.optional cfg.wifi.enable pkgs.sg2002-aic8800-firmware;
       # These small images deliberately omit the all-firmware collection,

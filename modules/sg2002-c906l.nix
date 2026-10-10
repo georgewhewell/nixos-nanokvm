@@ -224,6 +224,9 @@ in
       "sg2002-c906l-control"
       "sg2002-c906l-remoteproc"
     ] ++ lib.optionals lcdEnabled [ "sg2002-c906l-wifi-power" "sg2002-c906l-framebuffer" ];
+    # The C906L regulator powers the AIC8800, and module load order cannot
+    # put it ahead of the Wi-Fi driver.
+    sg2002.wifi.loadDriverAtBoot = lib.mkIf lcdEnabled false;
     environment.systemPackages = [ (pkgs.sg2002-c906l-ctl-for contract) ];
   };
 }

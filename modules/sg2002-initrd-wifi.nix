@@ -51,9 +51,8 @@ in {
       # WiFi/NFS-root bring-up.
       sg2002.initrd.kernelModules = lib.optionals cfg.bluetooth.enable [ "bluetooth" "bnep" ] ++ [
         "aic8800_bsp"
-        "aic8800_fdrv"
         "aic8800_btlpm"
-      ];
+      ] ++ lib.optional cfg.wifi.loadDriverAtBoot "aic8800_fdrv";
       hardware.firmware = [pkgs.sg2002-aic8800-firmware];
 
       # NixOS's systemd initrd defaults /lib -> modulesClosure/lib
