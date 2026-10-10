@@ -653,10 +653,10 @@ with lib.kernel; {
   # storage is the SD/eMMC controller (cv-sd, kept above).
   MD = no;
   TARGET_CORE = no;
-  # SD initrds include this module through supportedFilesystems. Keeping it
-  # modular avoids adding an otherwise unused ~2 MiB filesystem to every
-  # USB/NFS live kernel built from this shared configuration.
-  BTRFS_FS = module;
+  # Built in so an SD image can mount its root without an initrd
+  # (sg2002.sdImage.initrd.enable = false). The USB/NFS live kernels built
+  # from this shared configuration carry it unused.
+  BTRFS_FS = yes;
   BTRFS_FS_POSIX_ACL = yes;
   # SG2002 has only generic integer RAID6 implementations. Benchmarking all
   # four at Btrfs module load costs roughly 37 seconds on the C906 and cannot

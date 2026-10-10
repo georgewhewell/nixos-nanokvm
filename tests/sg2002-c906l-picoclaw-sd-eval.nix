@@ -29,7 +29,21 @@ assert config.sg2002.wifi.wpaConfRuntimePath
   == "/etc/wpa_supplicant/wpa_supplicant-wlan0.conf";
 assert !config.sg2002.usbGadget.console.enable;
 assert config.sg2002.usbGadget.stage2.enable;
-assert config.sg2002.usbGadget.stage2.preserveInitrd;
+# The PicoClaw image boots without an initrd, so stage 2 creates the gadget,
+# the kernel finds the root by device name and stage 2 loads the C906L stack.
+assert !config.sg2002.sdImage.initrd.enable;
+assert !config.boot.initrd.enable;
+assert !config.sg2002.usbGadget.stage2.preserveInitrd;
+assert builtins.elem "root=/dev/mmcblk0p2" config.boot.kernelParams;
+assert !config.fileSystems."/".autoResize;
+assert pkgs.lib.all (module: builtins.elem module config.boot.kernelModules) [
+  "sg2002-c906l-control"
+  "sg2002-c906l-remoteproc"
+  "sg2002-c906l-wifi-power"
+];
+assert pcieConfig.sg2002.sdImage.initrd.enable;
+assert pcieConfig.boot.initrd.enable;
+assert builtins.elem "root=/dev/disk/by-label/NIXOS_SD" pcieConfig.boot.kernelParams;
 assert pcieConfig.sg2002.usbGadget.stage2.enable;
 assert !pcieConfig.sg2002.usbGadget.stage2.preserveInitrd;
 assert builtins.elem "sg2002-vpss" pcieConfig.sg2002.initrd.availableKernelModules;
@@ -52,7 +66,7 @@ assert builtins.elem "sg2002-c906l-framebuffer" config.sg2002.initrd.availableKe
 assert !builtins.elem "sg2002-c906l-framebuffer" config.sg2002.initrd.kernelModules;
 assert config.fileSystems."/".fsType == "btrfs";
 assert config.boot.loader.generic-extlinux-compatible.enable;
-assert config.boot.initrd.systemd.services.initrd-switch-root.enable;
+assert pcieConfig.boot.initrd.systemd.services.initrd-switch-root.enable;
 assert config.systemd.services."getty@".enable;
 assert builtins.elem "getty@tty1.service" config.systemd.targets.getty.wants;
 assert config.services.openssh.enable;
@@ -74,5 +88,10 @@ pkgs.runCommand "sg2002-c906l-picoclaw-sd-module-eval" { } ''
     ${config.system.build.installBootLoader}
   ${pkgs.gnugrep}/bin/grep -F 'btrfs property set -t inode /boot/nixos compression none' \
     ${config.system.build.installBootLoader}
+  # The entry writer must accept a generation that has no initrd.
+  builder=$(${pkgs.gnugrep}/bin/grep -o '/nix/store/[^ ]*sg2002-extlinux-conf-builder' \
+    ${config.system.build.installBootLoader} | head -n1)
+  ${pkgs.gnugrep}/bin/grep -F 'if test -e $path/initrd; then' "$builder"
+  ! ${pkgs.gnugrep}/bin/grep -F 'test -e $path/kernel -a -e $path/initrd' "$builder"
   touch "$out"
 ''

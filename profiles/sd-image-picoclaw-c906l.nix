@@ -33,6 +33,10 @@
       healthHost = null;
     };
 
+    # Nothing here needs stage 1: Linux reaches the card and the C906L
+    # without it, and stage 2 starts the gadget and the watchdog keeper.
+    sdImage.initrd.enable = lib.mkDefault false;
+
     # The Nano's onboard mic and speaker amplifier sit on the internal
     # RXADC/TXDAC. The amplifier has no enable GPIO on this carrier.
     audio.enable = true;

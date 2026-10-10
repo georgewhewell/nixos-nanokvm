@@ -8,6 +8,24 @@ partition.
 The firmware partition's LBA 1 start follows the vendor image. It is not a
 demonstrated requirement of the ROM.
 
+## Booting without an initrd
+
+`sg2002.sdImage.initrd.enable = false` drops the initrd from an SD image. The
+kernel has MMC and Btrfs built in, so it mounts `root=/dev/mmcblk0p2` itself
+and runs the NixOS stage-2 `init` directly; `extlinux.conf` then has no
+`INITRD` line for that generation. Generations with and without an initrd can
+share a card.
+
+Without stage 1, the USB gadget and the watchdog keeper start in stage 2, the
+root file system is grown by `sg2002-grow-root.service`, and
+`systemd-modules-load` in stage 2 loads every module. The PicoClaw C906L image
+sets this option; the other SD images keep their initrd until they have been
+tested without one.
+
+On a PicoClaw (single 1 GHz core, Linux 7.2.8) the root is mounted 0.8 s after
+kernel start and sshd listens at 39 s instead of 63-67 s; the DHCP lease on
+Wi-Fi arrives at 67 s instead of 78 s.
+
 ## NanoKVM-PCIe hardware test, 2026-09-18
 
 One SG2002 NanoKVM-PCIe was tested with the same firmware and root filesystem:
