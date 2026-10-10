@@ -1,0 +1,23 @@
+From: nixos-nanokvm
+Subject: [PATCH] web: ask the browser not to buffer the WebRTC video
+
+Browsers hold received video in a jitter buffer for smooth playout,
+which shows up as pointer lag on a KVM. Request a zero target; the
+browser still buffers as much as it needs to decode.
+---
+--- a/web/src/pages/desktop/screen/h264-webrtc.tsx
++++ b/web/src/pages/desktop/screen/h264-webrtc.tsx
+@@ -56,6 +56,13 @@
+ 
+     video.ontrack = (event) => {
+       if (videoRef.current && event.track.kind === 'video') {
++        // Remote control wants the newest picture, not a smooth one.
++        const receiver = event.receiver as RTCRtpReceiver & {
++          jitterBufferTarget?: number | null;
++          playoutDelayHint?: number | null;
++        };
++        receiver.jitterBufferTarget = 0;
++        receiver.playoutDelayHint = 0;
+         videoRef.current.srcObject = new MediaStream([event.track]);
+       }
+     };

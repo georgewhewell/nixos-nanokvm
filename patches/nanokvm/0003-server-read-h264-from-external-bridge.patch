@@ -1,0 +1,628 @@
+From: nixos-nanokvm
+Subject: [PATCH] server: read H.264 from an external bridge in nocamera builds
+
+A nocamera build has no video because libkvm.so cannot run on a
+mainline kernel. Mainline has its own V4L2 capture, scaler and encoder
+drivers instead, driven by sg2002-h264-bridge.
+
+When NANOKVM_H264_BRIDGE names such a program, ReadH264 starts it on
+demand, splits its Annex-B output into access units and hands each to
+the existing WebRTC and direct-H.264 streamers as soon as it is
+complete. The process is stopped after five seconds without readers
+and restarted when the resolution, bitrate, GOP or frame rate changes.
+A reader that falls behind skips to the newest key frame. Parameter
+sets are repeated on every key frame so late viewers can decode. MJPEG
+stays unavailable.
+
+Without the variable the build behaves as before.
+
+The splitter and the skip policy have tests:
+
+  go test -tags nocamera ./common
+---
+diff -urN a/server/common/h264_bridge.go b/server/common/h264_bridge.go
+--- /dev/null
++++ b/server/common/h264_bridge.go
+@@ -0,0 +1,387 @@
++//go:build nocamera
++
++package common
++
++import (
++	"bytes"
++	"io"
++	"os"
++	"os/exec"
++	"strconv"
++	"sync"
++	"syscall"
++	"time"
++	"unsafe"
++
++	log "github.com/sirupsen/logrus"
++)
++
++// H264BridgeEnv names an external capture/encode program that writes an
++// Annex-B H.264 stream to stdout when run with
++// `--output - --size full|half --bitrate BPS --gop N --max-fps N`.
++const H264BridgeEnv = "NANOKVM_H264_BRIDGE"
++
++const (
++	bridgeIdleTimeout  = 5 * time.Second
++	bridgeRetryDelay   = 3 * time.Second
++	bridgeQueueLength  = 30
++	bridgeReadWait     = 25 * time.Millisecond
++	bridgePipeSize     = 1 << 20
++	nalTypeSlice       = 1
++	nalTypeIDR         = 5
++	nalTypeSPS         = 7
++	nalTypePPS         = 8
++	resultKeyFrame     = 3
++	resultPredictFrame = 4
++)
++
++type accessUnit struct {
++	data []byte
++	key  bool
++}
++
++type bridgeParams struct {
++	half    bool
++	bitRate uint16
++	gop     uint8
++	fps     int
++}
++
++type h264Bridge struct {
++	mu        sync.Mutex
++	path      string
++	cmd       *exec.Cmd
++	units     chan accessUnit
++	pending   []accessUnit
++	params    bridgeParams
++	lastRead  time.Time
++	nextStart time.Time
++}
++
++func newH264Bridge() *h264Bridge {
++	return &h264Bridge{path: os.Getenv(H264BridgeEnv)}
++}
++
++// read waits at most bridgeReadWait for a picture; callers poll at the
++// frame rate and skip empty results.
++func (b *h264Bridge) read(height uint16, bitRate uint16) ([]byte, int) {
++	if b.path == "" {
++		return nil, -1
++	}
++
++	screen := GetScreen()
++	want := bridgeParams{
++		half:    height != 0 && height < 1080,
++		bitRate: bitRate,
++		gop:     screen.GOP,
++		fps:     screen.FPS,
++	}
++
++	b.mu.Lock()
++	b.lastRead = time.Now()
++	if b.cmd != nil && b.params != want {
++		b.stopLocked()
++	}
++	if b.cmd == nil && !b.lastRead.Before(b.nextStart) {
++		b.startLocked(want)
++	}
++	b.drainLocked()
++	if len(b.pending) == 0 && b.units != nil {
++		// Hand a picture over as it arrives instead of on the caller's
++		// next tick.
++		units := b.units
++		b.mu.Unlock()
++		select {
++		case unit, ok := <-units:
++			b.mu.Lock()
++			if ok && b.units == units {
++				b.pending = append(b.pending, unit)
++				b.drainLocked()
++			}
++		case <-time.After(bridgeReadWait):
++			b.mu.Lock()
++		}
++	}
++	if len(b.pending) == 0 {
++		b.mu.Unlock()
++		return nil, -1
++	}
++	unit := b.pending[0]
++	b.pending = b.pending[1:]
++	b.mu.Unlock()
++
++	if unit.key {
++		return unit.data, resultKeyFrame
++	}
++	return unit.data, resultPredictFrame
++}
++
++// A reader that fell behind resumes at the newest key picture instead of
++// showing the backlog late.
++func (b *h264Bridge) drainLocked() {
++	for b.units != nil {
++		select {
++		case unit, ok := <-b.units:
++			if !ok {
++				b.units = nil
++				continue
++			}
++			b.pending = append(b.pending, unit)
++			continue
++		default:
++		}
++		break
++	}
++	b.pending = skipToNewestKey(b.pending)
++}
++
++func skipToNewestKey(units []accessUnit) []accessUnit {
++	for i := len(units) - 1; i > 0; i-- {
++		if units[i].key {
++			return units[i:]
++		}
++	}
++	return units
++}
++
++func (b *h264Bridge) close() {
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	b.stopLocked()
++}
++
++func (b *h264Bridge) startLocked(params bridgeParams) {
++	size := "full"
++	if params.half {
++		size = "half"
++	}
++	args := []string{
++		"--output", "-",
++		"--size", size,
++		"--bitrate", strconv.Itoa(int(params.bitRate) * 1000),
++		"--gop", strconv.Itoa(int(params.gop)),
++	}
++	if params.fps > 0 {
++		args = append(args, "--max-fps", strconv.Itoa(params.fps))
++	}
++
++	cmd := exec.Command(b.path, args...)
++	cmd.Stderr = os.Stderr
++	stdout, writer, err := os.Pipe()
++	if err == nil {
++		cmd.Stdout = writer
++		err = cmd.Start()
++		_ = writer.Close()
++		if err != nil {
++			_ = stdout.Close()
++		}
++	}
++	if err != nil {
++		log.Errorf("h264 bridge: failed to start %s: %s", b.path, err)
++		b.nextStart = time.Now().Add(bridgeRetryDelay)
++		return
++	}
++	log.Debugf("h264 bridge: started %s %v", b.path, args)
++
++	units := make(chan accessUnit, bridgeQueueLength)
++	b.cmd = cmd
++	b.units = units
++	b.pending = nil
++	b.params = params
++
++	exited := make(chan struct{})
++	go func() {
++		splitAccessUnits(stdout, units, pipeDrainedProbe(stdout))
++		_ = stdout.Close()
++		err := cmd.Wait()
++		close(units)
++		close(exited)
++
++		b.mu.Lock()
++		if b.cmd == cmd {
++			// Exited on its own, e.g. no HDMI signal.
++			log.Debugf("h264 bridge: exited: %v", err)
++			b.cmd = nil
++			b.nextStart = time.Now().Add(bridgeRetryDelay)
++		}
++		b.mu.Unlock()
++	}()
++
++	// Release the encoder once nobody is watching.
++	go func() {
++		ticker := time.NewTicker(time.Second)
++		defer ticker.Stop()
++		for {
++			select {
++			case <-exited:
++				return
++			case <-ticker.C:
++				b.mu.Lock()
++				if b.cmd == cmd && time.Since(b.lastRead) > bridgeIdleTimeout {
++					b.stopLocked()
++				}
++				b.mu.Unlock()
++			}
++		}
++	}()
++}
++
++func (b *h264Bridge) stopLocked() {
++	if b.cmd == nil {
++		return
++	}
++	_ = b.cmd.Process.Signal(syscall.SIGTERM)
++	b.cmd = nil
++}
++
++var startCode = []byte{0, 0, 1}
++
++type unitAssembler struct {
++	out     chan<- accessUnit
++	current []byte
++	hasVCL  bool
++	hasSPS  bool
++	key     bool
++	sps     []byte
++	pps     []byte
++	// Set after an overflow: a decoder cannot resume on a P-frame.
++	waitKey bool
++}
++
++func startsPicture(nalType byte, firstPayload byte) bool {
++	if nalType != nalTypeSlice && nalType != nalTypeIDR {
++		return true
++	}
++	// first_mb_in_slice == 0 is the single bit '1'.
++	return firstPayload&0x80 != 0
++}
++
++func (a *unitAssembler) add(nal []byte, nalType byte) {
++	switch nalType {
++	case nalTypeSPS:
++		a.sps = append([]byte(nil), nal...)
++		a.hasSPS = true
++	case nalTypePPS:
++		a.pps = append([]byte(nil), nal...)
++	case nalTypeIDR:
++		a.key = true
++		a.hasVCL = true
++	case nalTypeSlice:
++		a.hasVCL = true
++	}
++	a.current = append(a.current, nal...)
++}
++
++func (a *unitAssembler) flush() {
++	if !a.hasVCL {
++		return
++	}
++	data := a.current
++	if a.key && !a.hasSPS && a.sps != nil && a.pps != nil {
++		// The encoder sends parameter sets once; every key frame must
++		// carry them for viewers that join later.
++		data = append(append(append([]byte(nil), a.sps...), a.pps...), data...)
++	}
++	unit := accessUnit{data: data, key: a.key}
++	a.current, a.hasVCL, a.hasSPS, a.key = nil, false, false, false
++
++	if a.waitKey && !unit.key {
++		return
++	}
++	select {
++	case a.out <- unit:
++		a.waitKey = false
++	default:
++		a.waitKey = true
++	}
++}
++
++func nextStartCode(buf []byte, from int) (int, int) {
++	index := bytes.Index(buf[from:], startCode)
++	if index < 0 {
++		return -1, 0
++	}
++	index += from
++	if index > from && buf[index-1] == 0 {
++		return index - 1, 4
++	}
++	return index, 3
++}
++
++// The writer emits each picture with one write, and a pipe this large
++// takes it whole, so an empty pipe after a read means the picture is
++// complete.
++func pipeDrainedProbe(pipe *os.File) func() bool {
++	fd := pipe.Fd()
++	_, _, _ = syscall.Syscall(syscall.SYS_FCNTL, fd, syscall.F_SETPIPE_SZ, bridgePipeSize)
++	return func() bool {
++		var queued int32
++		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, syscall.TIOCINQ,
++			uintptr(unsafe.Pointer(&queued)))
++		return errno == 0 && queued == 0
++	}
++}
++
++// A picture is emitted when the header of the next one is seen, or at
++// once when drained reports that the writer has nothing more queued.
++func splitAccessUnits(r io.Reader, out chan<- accessUnit, drained func() bool) {
++	assembler := &unitAssembler{out: out}
++	chunk := make([]byte, 64*1024)
++	var buf []byte
++	// buf[0] is the start code of the pending NAL once synced.
++	synced := false
++	codeLen := 0
++	checked := false
++	searchFrom := 0
++
++	for {
++		n, err := r.Read(chunk)
++		buf = append(buf, chunk[:n]...)
++
++		if !synced {
++			if at, length := nextStartCode(buf, 0); at >= 0 {
++				buf = buf[at:]
++				synced, codeLen, checked, searchFrom = true, length, false, length
++			} else if len(buf) > 3 {
++				buf = buf[len(buf)-3:]
++			}
++		}
++
++		for synced {
++			if !checked && len(buf) >= codeLen+2 {
++				if startsPicture(buf[codeLen]&0x1f, buf[codeLen+1]) {
++					assembler.flush()
++				}
++				checked = true
++			}
++			at, length := nextStartCode(buf, searchFrom)
++			if at < 0 {
++				if len(buf) > 3 && len(buf)-3 > searchFrom {
++					searchFrom = len(buf) - 3
++				}
++				break
++			}
++			if at > codeLen {
++				assembler.add(buf[:at], buf[codeLen]&0x1f)
++			}
++			buf = buf[at:]
++			codeLen, checked, searchFrom = length, false, length
++		}
++
++		if synced && drained != nil && len(buf) > codeLen+1 {
++			nalType := buf[codeLen] & 0x1f
++			if (nalType == nalTypeSlice || nalType == nalTypeIDR) && drained() {
++				if !checked && startsPicture(nalType, buf[codeLen+1]) {
++					assembler.flush()
++				}
++				assembler.add(buf, nalType)
++				assembler.flush()
++				buf, synced = nil, false
++			}
++		}
++
++		if err != nil {
++			return
++		}
++	}
++}
+diff -urN a/server/common/h264_bridge_test.go b/server/common/h264_bridge_test.go
+--- /dev/null
++++ b/server/common/h264_bridge_test.go
+@@ -0,0 +1,160 @@
++//go:build nocamera
++
++package common
++
++import (
++	"bytes"
++	"io"
++	"testing"
++)
++
++func nal(code4 bool, header byte, payload ...byte) []byte {
++	out := []byte{0, 0, 1}
++	if code4 {
++		out = []byte{0, 0, 0, 1}
++	}
++	return append(append(out, header), payload...)
++}
++
++type chunked struct {
++	data []byte
++	size int
++}
++
++func (c *chunked) Read(p []byte) (int, error) {
++	if len(c.data) == 0 {
++		return 0, io.EOF
++	}
++	n := c.size
++	if n > len(c.data) {
++		n = len(c.data)
++	}
++	copy(p, c.data[:n])
++	c.data = c.data[n:]
++	return n, nil
++}
++
++func TestSplit(t *testing.T) {
++	sps := nal(true, 0x67, 1, 2, 3)
++	pps := nal(true, 0x68, 4)
++	idr := nal(true, 0x65, 0x88, 9, 9, 0, 0, 3, 1)
++	p1 := nal(true, 0x41, 0x9a, 7)
++	p2a := nal(false, 0x41, 0x9a, 8)
++	p2b := nal(false, 0x41, 0x20, 8) // second slice of the same picture
++	idr2 := nal(true, 0x65, 0x88, 5)
++	tail := nal(true, 0x41, 0x9a, 1)
++	var stream []byte
++	for _, part := range [][]byte{{0xff, 0}, sps, pps, idr, p1, p2a, p2b, idr2, tail} {
++		stream = append(stream, part...)
++	}
++	want := []accessUnit{
++		{append(append(append([]byte{}, sps...), pps...), idr...), true},
++		{p1, false},
++		{append(append([]byte{}, p2a...), p2b...), false},
++		{append(append(append([]byte{}, sps...), pps...), idr2...), true},
++	}
++	for size := 1; size <= len(stream); size++ {
++		out := make(chan accessUnit, 16)
++		splitAccessUnits(&chunked{append([]byte{}, stream...), size}, out, nil)
++		close(out)
++		var got []accessUnit
++		for unit := range out {
++			got = append(got, unit)
++		}
++		if len(got) != len(want) {
++			t.Fatalf("chunk %d: %d units, want %d", size, len(got), len(want))
++		}
++		for i := range want {
++			if got[i].key != want[i].key || !bytes.Equal(got[i].data, want[i].data) {
++				t.Fatalf("chunk %d unit %d: %v %x, want %v %x", size, i, got[i].key, got[i].data, want[i].key, want[i].data)
++			}
++		}
++	}
++}
++
++func TestOverflowResumesOnKey(t *testing.T) {
++	out := make(chan accessUnit, 1)
++	a := &unitAssembler{out: out}
++	feed := func(header byte) {
++		a.flush()
++		a.add(nal(true, header, 0x88), header&0x1f)
++	}
++	feed(0x65)
++	feed(0x41)
++	feed(0x41)
++	<-out
++	feed(0x41)
++	feed(0x65)
++	feed(0x41)
++	select {
++	case unit := <-out:
++		if !unit.key {
++			t.Fatal("resumed on a non-key picture")
++		}
++	default:
++		t.Fatal("nothing queued after key picture")
++	}
++}
++
++func TestSkipToNewestKey(t *testing.T) {
++	p := accessUnit{data: []byte{1}}
++	k := accessUnit{data: []byte{2}, key: true}
++	cases := []struct {
++		in   []accessUnit
++		want int
++	}{
++		{nil, 0}, {[]accessUnit{p, p}, 2}, {[]accessUnit{k, p, p}, 3},
++		{[]accessUnit{p, p, k, p}, 2}, {[]accessUnit{k, k, k}, 1},
++	}
++	for i, c := range cases {
++		got := skipToNewestKey(c.in)
++		if len(got) != c.want || (c.want > 0 && len(c.in) != c.want && !got[0].key) {
++			t.Fatalf("case %d: %d units", i, len(got))
++		}
++	}
++}
++
++type writes struct{ parts [][]byte }
++
++func (w *writes) Read(p []byte) (int, error) {
++	if len(w.parts) == 0 {
++		return 0, io.EOF
++	}
++	n := copy(p, w.parts[0])
++	w.parts = w.parts[1:]
++	return n, nil
++}
++
++func TestDrainedFlushesEachWrite(t *testing.T) {
++	sps := nal(true, 0x67, 1)
++	pps := nal(true, 0x68, 2)
++	idr := nal(true, 0x65, 0x88, 3)
++	p := nal(true, 0x41, 0x9a, 4)
++	first := append(append(append([]byte{}, sps...), pps...), idr...)
++	src := &writes{parts: [][]byte{first, p, idr, sps}}
++	out := make(chan accessUnit, 8)
++	seen := 0
++	splitAccessUnits(src, out, func() bool {
++		// Every earlier write must already have produced its picture.
++		if len(out) != seen {
++			t.Fatalf("at write %d: %d units queued", seen+1, len(out))
++		}
++		seen++
++		return true
++	})
++	close(out)
++	var got []accessUnit
++	for unit := range out {
++		got = append(got, unit)
++	}
++	if len(got) != 3 || !got[0].key || got[1].key || !got[2].key {
++		t.Fatalf("units: %d", len(got))
++	}
++	if !bytes.Equal(got[0].data, first) || !bytes.Equal(got[1].data, p) {
++		t.Fatal("unit contents differ")
++	}
++	want := append(append(append([]byte{}, sps...), pps...), idr...)
++	if !bytes.Equal(got[2].data, want) {
++		t.Fatalf("late key picture lacks parameter sets: %x", got[2].data)
++	}
++}
+diff -urN a/server/common/kvm_vision_stub.go b/server/common/kvm_vision_stub.go
+--- a/server/common/kvm_vision_stub.go
++++ b/server/common/kvm_vision_stub.go
+@@ -9,9 +9,9 @@
+ // around them — we have to keep libkvm.so out of the link entirely.
+ //
+ // Building with -tags nocamera selects this file and excludes the
+-// real one, so the server starts with no HDMI capture / video
+-// streaming but everything else (HID, network, storage, OLED-config,
+-// auth, web UI) works.
++// real one. H.264 then comes from the external program named by
++// NANOKVM_H264_BRIDGE (see h264_bridge.go); without it there is no
++// video. MJPEG is unavailable either way.
+ 
+ package common
+ 
+@@ -26,12 +26,14 @@
+ 	kvmVisionOnce sync.Once
+ )
+ 
+-type KvmVision struct{}
++type KvmVision struct {
++	bridge *h264Bridge
++}
+ 
+ func GetKvmVision() *KvmVision {
+ 	kvmVisionOnce.Do(func() {
+-		kvmVision = &KvmVision{}
+-		log.Debugf("kvm vision: built with -tags nocamera; HDMI capture unavailable")
++		kvmVision = &KvmVision{bridge: newH264Bridge()}
++		log.Debugf("kvm vision: built with -tags nocamera; h264 bridge %q", kvmVision.bridge.path)
+ 	})
+ 	return kvmVision
+ }
+@@ -41,7 +43,7 @@
+ }
+ 
+ func (k *KvmVision) ReadH264(width uint16, height uint16, bitRate uint16) (data []byte, result int) {
+-	return nil, -1
++	return k.bridge.read(height, bitRate)
+ }
+ 
+ func (k *KvmVision) SetHDMI(enable bool) int {
+@@ -52,4 +54,6 @@
+ 
+ func (k *KvmVision) SetFrameDetect(frame uint8) {}
+ 
+-func (k *KvmVision) Close() {}
++func (k *KvmVision) Close() {
++	k.bridge.close()
++}

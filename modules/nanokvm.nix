@@ -307,6 +307,18 @@ in
       '';
     };
 
+    h264Bridge = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = literalExpression ''"''${pkgs.sg2002-h264-bridge}/bin/sg2002-h264-bridge"'';
+      description = ''
+        Program a nocamera server runs for H.264 video, in place of the
+        vendor capture library. It must accept sg2002-h264-bridge's
+        options and write Annex-B to stdout. Null leaves a nocamera
+        server without video.
+      '';
+    };
+
     kmods.enable = mkOption {
       type = types.bool;
       default = true;
@@ -684,6 +696,8 @@ in
 
         environment = {
           HOME = "/root";
+        } // lib.optionalAttrs (cfg.h264Bridge != null) {
+          NANOKVM_H264_BRIDGE = cfg.h264Bridge;
         };
 
         serviceConfig = {
