@@ -139,6 +139,10 @@
           "sg2002-coda980-firmware"
           "sg2002-c906l-firmware"
           "sophgo-host-tools"
+          "sophgo-cvikernel"
+          "sophgo-cvibuilder"
+          "sophgo-cviruntime"
+          "sophgo-tpu-examples"
         ];
 
       # Extra args threaded into every NixOS module via `_module.args`
@@ -449,6 +453,15 @@
             sg2002-h264-bridge
             sg2002-h264-bridge-pcma
             sg2002-kernel-mainline
+            sg2002-cvikernel
+            sg2002-cvikernel-host
+            sg2002-tpu
+            sg2002-cvibuilder
+            sg2002-cviruntime
+            sg2002-tpu-examples
+            sg2002-tpu-mlir
+            sg2002-tpu-mobilenet-v2
+            sg2002-tpu-yolov5n
             sg2002-usb-boot
             sg2002-usb-boot-c906l
             sg2002-usb-boot-c906l-timer4
@@ -541,9 +554,13 @@
             name = entry.tag;
             value = imageJob entry;
           }) catalog);
-          packages = {
-            nanokvm-server = self.packages.x86_64-linux.nanokvm-server;
-          };
+          packages = lib.getAttrs [
+            "nanokvm-server"
+            "sg2002-cviruntime"
+            "sg2002-tpu-examples"
+            "sg2002-tpu-mobilenet-v2"
+            "sg2002-tpu-yolov5n"
+          ] self.packages.x86_64-linux;
           checks = lib.getAttrs [
             "extlinux-try-boot"
             "sg2002-initrd-eval"

@@ -1,0 +1,814 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 585fd39..01f1977 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2,15 +2,7 @@ cmake_minimum_required(VERSION 3.1.0)
+ 
+ project(cviruntime C CXX)
+ 
+-execute_process(
+-  COMMAND git describe --always --tags --dirty
+-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+-  RESULT_VARIABLE GIT_EXEC_RESULT
+-  OUTPUT_VARIABLE GIT_SHORT_HASH)
+-
+-string(STRIP ${GIT_SHORT_HASH} GIT_SHORT_HASH)
+-string(TIMESTAMP BUILD_TIME "%Y%m%d")
+-set(RUNTIME_VERSION "${GIT_SHORT_HASH}@${BUILD_TIME}")
++set(RUNTIME_VERSION "ef8044988c2b4a5d491125d13e6f048b5f8a1389-mainline")
+ message(STATUS "runtime version: ${RUNTIME_VERSION}")
+ add_definitions(-DRUNTIME_VERSION="${RUNTIME_VERSION}")
+ 
+@@ -25,7 +17,7 @@ option(ENABLE_COMPRESS_CMDBUF "enable compressed cmdbuf" ON)
+ option(ENABLE_CPU_FUNC "enable cpu functions" ON)
+ option(ENABLE_PMU "enable tpu PMU" ON)
+ 
+-set(SAFETY_FLAGS "-Werror -Wall -Wextra -fno-strict-aliasing -Wno-missing-field-initializers")
++set(SAFETY_FLAGS "-Wall -Wextra -fno-strict-aliasing -Wno-missing-field-initializers")
+ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${SAFETY_FLAGS}")
+ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SAFETY_FLAGS}")
+ 
+@@ -114,7 +106,10 @@ if(RUNTIME STREQUAL CMODEL)
+ endif()
+ 
+ add_subdirectory(src)
+-add_subdirectory(tool)
++option(ENABLE_TOOLS "Build vendor model tools (requires cnpy)" OFF)
++if(ENABLE_TOOLS)
++  add_subdirectory(tool)
++endif()
+ if (ENABLE_PYRUNTIME STREQUAL "ON")
+   add_subdirectory(python)
+ endif()
+diff --git a/src/common/program.cpp b/src/common/program.cpp
+index 2a3b626..33f8d87 100644
+--- a/src/common/program.cpp
++++ b/src/common/program.cpp
+@@ -335,7 +335,8 @@ bool Program::run() {
+     r->reset();
+   }
+   for (auto &r : _routines) {
+-    r->run();
++    if (r->run() != CVI_RC_SUCCESS)
++      return false;
+   }
+   return true;
+ }
+diff --git a/src/soc/181x/CMakeLists.txt b/src/soc/181x/CMakeLists.txt
+index f455c3a..e05719b 100644
+--- a/src/soc/181x/CMakeLists.txt
++++ b/src/soc/181x/CMakeLists.txt
+@@ -3,7 +3,6 @@ cmake_minimum_required(VERSION 2.8.0)
+ include_directories(./)
+ include_directories(../common)
+ include_directories(${CMAKE_SYSROOT}/include)
+-add_definitions(-DION_CACHE_OPEN)
+ add_definitions(-DMULTI_PROCESS)
+ 
+ set(RUNTIME_SOURCES ${RUNTIME_SOURCES}
+@@ -13,6 +12,7 @@ set(RUNTIME_SOURCES ${RUNTIME_SOURCES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/cvi_rt_181x.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/cvi181x_device_mem.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/cvi_device_mem.cpp
++   ${CMAKE_CURRENT_SOURCE_DIR}/../common/sg2002_backend.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/cvi_rt_base.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/cviruntime_context.cpp)
+ 
+@@ -27,7 +27,7 @@ add_library(cviruntime-static STATIC ${RUNTIME_SOURCES})
+ set_property(TARGET cviruntime-static PROPERTY POSITION_INDEPENDENT_CODE ON)
+ 
+ add_library(cviruntime SHARED ${RUNTIME_SOURCES})
+-target_link_libraries(cviruntime cvikernel ${EXTRA_LIBS})
++target_link_libraries(cviruntime sg2002-tpu cvikernel ${EXTRA_LIBS})
+ 
+ install(TARGETS cviruntime DESTINATION lib)
+ install(TARGETS cviruntime-static DESTINATION lib)
+diff --git a/src/soc/181x/cvi181x_device_mem.cpp b/src/soc/181x/cvi181x_device_mem.cpp
+index 4c8a82a..8cee3ef 100644
+--- a/src/soc/181x/cvi181x_device_mem.cpp
++++ b/src/soc/181x/cvi181x_device_mem.cpp
+@@ -1,4 +1,7 @@
+ #include <cstdlib>
++extern "C" {
++#include <sg2002-tpu-runtime.h>
++}
+ #include <memory>
+ #include <cstring>
+ #include "cvi181x_device_mem.h"
+@@ -21,28 +24,13 @@ bmerr_t Cvi181xDeviceMem::device_open(int index, bmdev_t *dev)
+   pdev->info.info182x = bmk1822_chip_info();
+   pdev->gmem_size = g_gmem_size;
+ 
+-  const char* tpu_dev_name_defalut = TPU_DEV_NAME;
+-  const char* tpu_dev_name_env = std::getenv("TPU_DEV");
+-  const char *tpu_dev_name = tpu_dev_name_defalut;
+-  if (tpu_dev_name_env) {
+-    tpu_dev_name = tpu_dev_name_env;
+-  }
+-
+-  pdev->dev_fd = open(tpu_dev_name, O_RDWR);
+-  if (pdev->dev_fd <= 0) {
+-    TPU_LOG_WARNING("open %s failed\n", tpu_dev_name);
+-    return BM_ERR_FAILURE;
+-  }
+-
+-  pdev->ion_fd = open(ION_DEV_NAME, O_RDWR);
+-  if (pdev->ion_fd <= 0) {
+-    TPU_LOG_WARNING("open %s failed\n", ION_DEV_NAME);
++  pdev->dev_fd = sg2002_tpu_open();
++  if (pdev->dev_fd < 0) {
++    BMDEV_LOCK_DEINIT(pdev);
++    delete pdev;
+     return BM_ERR_FAILURE;
+   }
+ 
+-  int ret = ion_query_heap(pdev);
+-  TPU_ASSERT(ret == BM_SUCCESS, NULL);
+-
+   *dev = pdev;
+ 
+   return BM_SUCCESS;
+@@ -50,8 +38,7 @@ bmerr_t Cvi181xDeviceMem::device_open(int index, bmdev_t *dev)
+ 
+ void Cvi181xDeviceMem::device_close(bmdev_t dev)
+ {
+-  close(dev->ion_fd);
+-  close(dev->dev_fd);
++  close_buffers(dev);
+ 
+   // TPU_LOG_WARNING("device[%d] closed\n", dev->index);
+ 
+@@ -168,40 +155,15 @@ bmerr_t Cvi181xDeviceMem::load_dmabuf(bmctx_t ctx, bmmem_device_t dmabuf,
+ }
+ 
+ 
+-bmerr_t Cvi181xDeviceMem::load_cmdbuf_tee(bmctx_t ctx, uint8_t *cmdbuf, size_t sz,
+-                            uint64_t neuron_gaddr, uint64_t weight_gaddr,
+-                            uint32_t weight_len, bmmem_device_t *cmdbuf_mem)
++bmerr_t Cvi181xDeviceMem::load_cmdbuf_tee(bmctx_t, uint8_t *, size_t,
++                            uint64_t, uint64_t, uint32_t, bmmem_device_t *)
+ {
+-  //bmerr_t ret;
+-  bmmem_device_t dmabuf_mem;
+-
+-  //malloc double size buffer, because TEE needs 2nd space to calculate dmabuf
+-  if (protect) {
+-    dmabuf_mem = mem_alloc_pagesize(ctx, sz + sz);
+-  } else {
+-    dmabuf_mem = mem_alloc_raw(ctx, sz + sz);
+-  }
+-  if (!dmabuf_mem) {
+-      TPU_LOG_ERROR("alloc dmabuf mem fail!\n");
+-      return BM_ERR_NOMEM;
+-  }
+-
+-  //transfer encrypted cmdbuf to TEE
+-  memcpy(dmabuf_mem->v_addr, cmdbuf, sz);
+-  TPU_ASSERT((int)mem_flush_ext(ctx->dev, dmabuf_mem->dma_fd,
+-        dmabuf_mem->p_addr, sz) == BM_SUCCESS, NULL);
+-
+-  //ioctl to get secure dma buffer
+-  load_tee(ctx, dmabuf_mem->p_addr, sz, weight_gaddr, weight_len, neuron_gaddr);
+-
+-  //this region should be protected, can't touch in REE
+-  *cmdbuf_mem = dmabuf_mem;
+-	return 0;
++  fprintf(stderr, "Encrypted TPU models require the vendor trusted firmware\n");
++  return BM_ERR_FAILURE;
+ }
+ 
+-bmerr_t Cvi181xDeviceMem::unload_tee(bmctx_t ctx, uint64_t paddr, size_t size) {
+-  TPU_ASSERT(0, NULL); // not support
+-  return BM_SUCCESS;
++bmerr_t Cvi181xDeviceMem::unload_tee(bmctx_t, uint64_t, size_t) {
++  return BM_ERR_FAILURE;
+ }
+ 
+ bmerr_t Cvi181xDeviceMem::parse_pmubuf(bmmem_device_t cmdbuf_mem, uint8_t **buf_start, uint32_t *buf_len) {
+diff --git a/src/soc/common/cvi_device_mem.cpp b/src/soc/common/cvi_device_mem.cpp
+index d875ada..6d4eb11 100644
+--- a/src/soc/common/cvi_device_mem.cpp
++++ b/src/soc/common/cvi_device_mem.cpp
+@@ -25,351 +25,6 @@ CviDeviceMem::CviDeviceMem() {
+ }
+ 
+ CviDeviceMem::~CviDeviceMem() {}
+-#ifdef ION_CACHE_OPEN
+-bmerr_t CviDeviceMem::mem_flush_fd(bmdev_t dev, int dma_fd) {
+-  int ret;
+-  ret = ioctl(dev->dev_fd, CVITPU_DMABUF_FLUSH_FD, &dma_fd);
+-  if (ret != 0) {
+-    TPU_LOG_WARNING("memory flush failed, ret=%x\n", ret);
+-    return BM_ERR_FAILURE;
+-  }
+-  return BM_SUCCESS;
+-}
+-
+-bmerr_t CviDeviceMem::mem_invld_fd(bmdev_t dev, int dma_fd) {
+-  int ret;
+-  ret = ioctl(dev->dev_fd, CVITPU_DMABUF_INVLD_FD, &dma_fd);
+-  if (ret != 0) {
+-    TPU_LOG_WARNING("memory invalidate failed, ret=%x\n", ret);
+-    return BM_ERR_FAILURE;
+-  }
+-  return BM_SUCCESS;
+-}
+-
+-#define __ALIGN_MASK(x,mask)    (((x)+(mask))&~(mask))
+-#define ALIGN(x,a)              __ALIGN_MASK(x,(__typeof__(x))(a)-1)
+-
+-bmerr_t CviDeviceMem::mem_flush_ext(bmdev_t dev, int dma_fd, uint64_t paddr, size_t size)
+-{
+-  int ret;
+-  struct bm_cache_op_arg flush_arg;
+-  flush_arg.paddr = paddr + GLOBAL_MEM_START_ADDR;
+-  flush_arg.size = size;
+-  flush_arg.dma_fd = dma_fd;
+-
+-  uint64_t addr_new = ALIGN(flush_arg.paddr, 0x40);
+-  flush_arg.size = ALIGN(flush_arg.size, 0x40);
+-
+-  if (addr_new != flush_arg.paddr) {
+-    //TPU_LOG_WARNING("fix flush add_p=0x%lx, len=0x%llx, add_p_ori=0x%llx\n", addr_new - 0x40, flush_arg.size, flush_arg.paddr);
+-    flush_arg.size += 0x40;
+-    flush_arg.paddr = addr_new - 0x40;
+-  } else {
+-    //TPU_LOG_WARNING("ok flush add_p=0x%llx, len=0x%llx\n", flush_arg.paddr, flush_arg.size);
+-  }
+-
+-  // In some special cases, third-party libraries may cause fd errors
+-  // so if the ioctl fails, then reopen the device
+-  for (int i = 0; i < 3; ++i) {
+-    ret = ioctl(dev->dev_fd, CVITPU_DMABUF_FLUSH, &flush_arg);
+-    if (ret != 0) {
+-        perror("flush ioctl fail:");
+-        TPU_LOG_WARNING("memory flush failed, ret=%x\n", ret);
+-        reopen_dev(dev, 1);
+-    } else {
+-        break;
+-    }
+-  }
+-  return ret == 0 ? BM_SUCCESS : BM_ERR_FAILURE;
+-}
+-
+-bmerr_t CviDeviceMem::mem_invld_ext(bmdev_t dev, int dma_fd, uint64_t paddr, size_t size)
+-{
+-  int ret;
+-  struct bm_cache_op_arg invalidate_arg;
+-  invalidate_arg.paddr = paddr + GLOBAL_MEM_START_ADDR;
+-  invalidate_arg.size = size;
+-  invalidate_arg.dma_fd = dma_fd;
+-
+-  uint64_t addr_new = ALIGN(invalidate_arg.paddr, 0x40);
+-  invalidate_arg.size = ALIGN(invalidate_arg.size, 0x40);
+-
+-  if (addr_new != invalidate_arg.paddr) {
+-    //TPU_LOG_WARNING("fix invalid add_p=0x%lx, len=0x%llx, add_p_ori=0x%llx\n", addr_new - 0x40, invalidate_arg.size, invalidate_arg.paddr);
+-    invalidate_arg.size += 0x40;
+-    invalidate_arg.paddr = addr_new - 0x40;
+-  } else {
+-    //TPU_LOG_WARNING("ok invalid add_p=0x%llx, len=0x%llx\n", invalidate_arg.paddr, invalidate_arg.size);
+-  }
+-
+-  // In some special cases, third-party libraries may cause fd errors
+-  // so if the ioctl fails, then reopen the device
+-  for (int i = 0; i < 3; ++i) {
+-      ret = ioctl(dev->dev_fd, CVITPU_DMABUF_INVLD, &invalidate_arg);
+-      if (ret != 0) {
+-          perror("invld ioctl fail:");
+-          TPU_LOG_WARNING("memory invalidate failed, ret=%x\n", ret);
+-          reopen_dev(dev, 1);
+-      } else {
+-        break;
+-      }
+-  }
+-  return ret == 0 ? BM_SUCCESS : BM_ERR_FAILURE;
+-}
+-
+-#else
+-
+-bmerr_t CviDeviceMem::mem_flush_ext(bmdev_t dev, int dma_fd, uint64_t paddr, size_t size)
+-{
+-  return BM_SUCCESS;
+-}
+-
+-bmerr_t CviDeviceMem::mem_invld_ext(bmdev_t dev, int dma_fd, uint64_t paddr, size_t size)
+-{
+-  return BM_SUCCESS;
+-}
+-
+-#endif
+-
+-bmerr_t CviDeviceMem::submit_dmabuf(bmdev_t dev, int dma_fd, uint32_t seq_no)
+-{
+-  struct bm_submit_dma_arg submit_dma_arg;
+-  submit_dma_arg.fd = dma_fd;
+-  submit_dma_arg.seq_no = seq_no;
+-  int ret = ioctl(dev->dev_fd, CVITPU_SUBMIT_DMABUF, &submit_dma_arg);
+-  if (ret != 0) {
+-      perror("submit ioctl fail:");
+-      TPU_LOG_WARNING("submit dmabuf failed err[%d]\n", ret);
+-      reopen_dev(dev, 1);
+-  }
+-  return ret ? BM_ERR_FAILURE : BM_SUCCESS;
+-}
+-
+-bmerr_t CviDeviceMem::wait_dmabuf(bmdev_t dev, uint32_t seq_no)
+-{
+-  struct bm_wait_dma_arg wait_dma_arg;
+-  wait_dma_arg.seq_no = seq_no;
+-  int ret = 0, loop_cnt = 0;
+-
+-  do {
+-    if (loop_cnt > 10)
+-      TPU_LOG_WARNING("bm_device_wait_dmabuf() triggered loop=%d\n", loop_cnt);
+-
+-    ret = ioctl(dev->dev_fd, CVITPU_WAIT_DMABUF, &wait_dma_arg);
+-    loop_cnt ++;
+-  } while (ret);
+-
+-  if (wait_dma_arg.ret != 0) {
+-    TPU_LOG_WARNING("wait dmabuf failed[%d]\n", wait_dma_arg.ret);
+-    return BM_ERR_FAILURE;
+-  }
+-  return BM_SUCCESS;
+-}
+-
+-// In some special cases, third-party libraries may cause fd errors
+-// so if the ioctl fails, then reopen the device
+-bmerr_t CviDeviceMem::reopen_dev(bmdev_t dev, int flag) {
+-    if (flag == 1) {
+-        // reopen tpu
+-        const char *tpu_dev_name_defalut = TPU_DEV_NAME;
+-        const char *tpu_dev_name_env     = std::getenv("TPU_DEV");
+-        const char *tpu_dev_name         = tpu_dev_name_defalut;
+-        if (tpu_dev_name_env) {
+-            tpu_dev_name = tpu_dev_name_env;
+-        }
+-        printf("reopen tpu dev\n");
+-        TPU_LOG_WARNING("reopen tpu dev");
+-        int dev_fd = open(tpu_dev_name, O_RDWR);
+-        if (dev_fd <= 0) {
+-            TPU_LOG_WARNING("open tpu dev failed\n");
+-            return BM_ERR_FAILURE;
+-        } else {
+-            close(dev->dev_fd);
+-            dev->dev_fd = dev_fd;
+-        }
+-        printf("reopen tpu dev success\n");
+-        TPU_LOG_WARNING("reopen tpu dev success");
+-    } else if (flag == 2) {
+-        // reopen ion
+-        printf("reopen ion dev\n");
+-        TPU_LOG_WARNING("reopen ion dev");
+-        int ion_fd = open(ION_DEV_NAME, O_RDWR | O_DSYNC);
+-        if (ion_fd <= 0) {
+-            TPU_LOG_WARNING("open ion dev failed\n");
+-            return BM_ERR_FAILURE;
+-        } else {
+-            printf("reopen ion dev success\n");
+-            TPU_LOG_WARNING("reopen ion dev success");
+-            close(dev->ion_fd);
+-            dev->ion_fd = ion_fd;
+-            /*
+-            if (0 != ion_query_heap(dev)) {
+-                TPU_LOG_WARNING("ion_query_heap failed\n");
+-            }
+-            */
+-        }
+-    } else {
+-        TPU_LOG_WARNING("Input param error in reopen_dev! flag:%d\n", flag);
+-        return BM_ERR_INVALID_ARGUMENT;
+-    }
+-    return BM_SUCCESS;
+-}
+-
+-bmerr_t CviDeviceMem::ion_ioctl(int fd, unsigned int heap_id_mask, size_t* size,  uint64_t *paddr, int *dma_fd) {
+-  if (!ion_legacy) {
+-    struct ion_allocation_data alloc_data;
+-    int ret;
+-
+-    /* alloc buffer */
+-    memset(&alloc_data, 0, sizeof(struct ion_allocation_data));
+-    alloc_data.len          = *size;
+-    alloc_data.heap_id_mask = heap_id_mask;
+-#ifdef ION_CACHE_OPEN
+-    alloc_data.flags = ION_FLAG_CACHED;
+-#else
+-    alloc_data.flags = 0;  // ION_FLAG_NONCACHED;
+-#endif
+-    strncpy(alloc_data.name, "tpu", MAX_ION_BUFFER_NAME);
+-
+-    // In some special cases, third-party libraries may cause fd errors
+-    // so if the ioctl fails, then reopen the device
+-    ret = ioctl(fd, ION_IOC_ALLOC, &alloc_data);
+-    if (0 == ret) {
+-      *paddr = alloc_data.paddr;
+-      *dma_fd = alloc_data.fd; 
+-      *size = alloc_data.len;
+-      return BM_SUCCESS;
+-    } else if (errno == EINVAL) {
+-      ion_legacy = true; 
+-      TPU_LOG_WARNING("use ion legacy!");
+-    } else {
+-      perror("ion ioctl fail:");
+-      TPU_LOG_WARNING("ion alloc failed, size = %zu, ret=%x\n", *size, ret);
+-      return BM_ERR_FAILURE;
+-    }
+-  }
+-
+-  struct ion_allocation_data_legacy alloc_data;
+-  int ret;
+-
+-  /* alloc buffer */
+-  memset(&alloc_data, 0, sizeof(struct ion_allocation_data_legacy));
+-  alloc_data.len          = *size;
+-  alloc_data.heap_id_mask = heap_id_mask;
+-#ifdef ION_CACHE_OPEN
+-  alloc_data.flags = ION_FLAG_CACHED;
+-#else
+-  alloc_data.flags = 0;  // ION_FLAG_NONCACHED;
+-#endif
+-
+-  // In some special cases, third-party libraries may cause fd errors
+-  // so if the ioctl fails, then reopen the device
+-  ret = ioctl(fd, ION_IOC_ALLOC_LEGACY, &alloc_data);
+-  if (0 == ret) {
+-    *paddr = alloc_data.paddr;
+-    *dma_fd = alloc_data.fd; 
+-    *size = alloc_data.len;
+-    return BM_SUCCESS;
+-  } else {
+-    perror("ion ioctl fail:");
+-    TPU_LOG_WARNING("ion alloc failed, size = %zu, ret=%x\n", *size, ret);
+-    return BM_ERR_FAILURE;
+-  }
+-}
+-
+-bmerr_t CviDeviceMem::mem_alloc(bmdev_t dev, size_t size, uint64_t *paddr,
+-                      uint8_t **vaddr, int *dma_fd)
+-{
+-  void *user_addr = NULL;
+-  int ret;
+-  unsigned int heap_id_mask = (1 << dev->ion_heap_id);
+-  int err_flag = 0;
+-
+-  // In some special cases, third-party libraries may cause fd errors
+-  // so if the ioctl fails, then reopen the device
+-  for (int i = 0; i < 3; ++i) {
+-    do {
+-      ret = ion_ioctl(dev->ion_fd, heap_id_mask, &size, paddr, dma_fd);
+-      if (ret != BM_SUCCESS) {
+-        err_flag = 2;
+-        break;
+-      }
+-
+-      /* mmap to user */
+-      user_addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED,
+-                       *dma_fd, 0);
+-      if (user_addr == MAP_FAILED) {
+-        perror("mmap fail:");
+-        TPU_LOG_WARNING("ion map failed phy_addr[%" PRIx64 "] length[%zu] fd[%u]\n", *paddr, size, *dma_fd);
+-        close(*dma_fd);
+-        err_flag = 0;
+-        ret = -1;
+-        break;
+-      }
+-
+-      *paddr -= GLOBAL_MEM_START_ADDR;
+-      *vaddr = (uint8_t *)user_addr;
+-      ret = mem_invld_ext(dev, *dma_fd, *paddr, size);
+-      if (ret != BM_SUCCESS) {
+-        munmap(user_addr, size);
+-        close(*dma_fd);
+-        TPU_LOG_WARNING("memory invalidate failed, ret=%x\n", ret);
+-        err_flag = 1;
+-        break;
+-      }
+-    } while (0);
+-    if (ret == BM_SUCCESS) {
+-      break;
+-    } else {
+-      if (err_flag > 0) {
+-        reopen_dev(dev, err_flag);
+-      }
+-    }
+-  }
+-
+-  return ret;
+-}
+-
+-bmerr_t CviDeviceMem::mem_free(uint8_t *vaddr, size_t size, int dma_fd)
+-{
+-  munmap(vaddr, size);
+-  close(dma_fd);
+-  return BM_SUCCESS;
+-}
+-
+-bmerr_t CviDeviceMem::ion_query_heap(bmdev_t dev)
+-{
+-  unsigned int heap_id;
+-  struct ion_heap_query query;
+-  struct ion_heap_data heap_data[MAX_HEAP_COUNT];
+-  int ret;
+-
+-  memset(&query, 0, sizeof(query));
+-  query.cnt = MAX_HEAP_COUNT;
+-  query.heaps = (unsigned long int)&heap_data[0];
+-  ret = ioctl(dev->ion_fd, ION_IOC_HEAP_QUERY, &query);
+-  if (ret != 0) {
+-    TPU_LOG_WARNING("io query heap failed, ret=%x\n", ret);
+-    return BM_ERR_FAILURE;
+-  }
+-
+-  heap_id = MAX_HEAP_COUNT + 1;
+-  for (unsigned int i = 0; i < query.cnt; i++) {
+-    if (heap_data[i].type == ION_HEAP_TYPE_CARVEOUT) {
+-      heap_id = heap_data[i].heap_id;
+-      break;
+-    }
+-  }
+-
+-  if (heap_id > MAX_HEAP_COUNT) {
+-    TPU_LOG_WARNING("no carveout heap found\n");
+-    return BM_ERR_FAILURE;
+-  }
+-
+-  dev->ion_heap_id = heap_id;
+-  return BM_SUCCESS;
+-}
+-
+ bmerr_t CviDeviceMem::load_tee(bmctx_t ctx, uint64_t cmdbuf_addr_ree, uint32_t cmdbuf_len_ree,
+                       uint64_t weight_addr_ree, uint32_t weight_len_ree,
+                       uint64_t neuron_addr_ree)
+diff --git a/src/soc/common/cvi_device_mem.h b/src/soc/common/cvi_device_mem.h
+index 792053c..e38cc50 100644
+--- a/src/soc/common/cvi_device_mem.h
++++ b/src/soc/common/cvi_device_mem.h
+@@ -4,13 +4,10 @@
+ #include <stddef.h>
+ #include <inttypes.h>
+ #include "bmruntime.h"
+-#include "linux/ion.h"
+ #include "linux/bm_npu_ioctl.h"
+ #include "bm_types.h"
+ 
+ #define TPU_DEV_NAME "/dev/cvi-tpu0"
+-#define ION_DEV_NAME "/dev/ion"
+-#define MAX_HEAP_COUNT ION_HEAP_TYPE_CUSTOM
+ 
+ typedef struct __tee_firewall_info {
+   uint64_t address;
+@@ -96,11 +93,9 @@ public:
+ 
+ public:
+   virtual void bmmem_dump_mem_array(void);
+-  bmerr_t ion_query_heap(bmdev_t dev);
+-#ifdef ION_CACHE_OPEN
+   virtual bmerr_t mem_flush_fd(bmdev_t dev, int dma_fd);
+   virtual bmerr_t mem_invld_fd(bmdev_t dev, int dma_fd);
+-#endif
++  void close_buffers(bmdev_t dev);
+   virtual bmerr_t mem_flush_ext(bmdev_t dev, int dma_fd, uint64_t paddr, size_t size);
+   virtual bmerr_t mem_invld_ext(bmdev_t dev, int dma_fd, uint64_t paddr, size_t size);
+   virtual bmerr_t submit_dmabuf(bmdev_t dev, int dma_fd, uint32_t seq_no);
+@@ -117,13 +112,11 @@ public:
+                   uint64_t array_base4, uint64_t array_base5,
+                   uint64_t array_base6, uint64_t array_base7);
+   virtual bmerr_t reopen_dev(bmdev_t dev, int flag);
+-  bmerr_t ion_ioctl(int fd, unsigned int heap_id_mask, size_t* size, uint64_t *paddr, int *dma_fd);
+ 
+  protected:
+   uint64_t GLOBAL_MEM_START_ADDR;
+   uint64_t g_gmem_size;
+   uint16_t tpu_dmabuf_header_m;
+-  bool ion_legacy = false;
+   bool protect = false; //if cmdbuf_mem protect
+ public:
+   static bmctx_t root_ctx_array[CTX_MAX_CNT];
+diff --git a/src/soc/common/sg2002_backend.cpp b/src/soc/common/sg2002_backend.cpp
+new file mode 100644
+index 0000000..d5c11d7
+--- /dev/null
++++ b/src/soc/common/sg2002_backend.cpp
+@@ -0,0 +1,220 @@
++// SPDX-License-Identifier: MIT
++// SG2002 mainline backend: owned DMA allocations, explicit CPU copies and
++// synchronous job completion. No ION, physical mmap or cache-maintenance ABI.
++#include "cvi_device_mem.h"
++extern "C" {
++#include <sg2002-tpu-runtime.h>
++}
++#include <climits>
++#include <cstdlib>
++#include <cstring>
++#include <map>
++#include <mutex>
++#include <vector>
++#include <sys/ioctl.h>
++#include <unistd.h>
++
++namespace {
++struct Buffer {
++  int fd;
++  sg2002_tpu_buffer dma;
++  uint8_t *cpu;
++};
++std::mutex buffers_lock;
++std::map<int, Buffer> buffers;
++unsigned next_buffer = 1;
++
++bmerr_t transfer(bmdev_t dev, int id, uint64_t address, size_t size, bool to_device) {
++  std::lock_guard<std::mutex> guard(buffers_lock);
++  auto it = buffers.find(id);
++  if (it == buffers.end() || it->second.fd != dev->dev_fd)
++    return BM_ERR_FAILURE;
++  Buffer &b = it->second;
++  if (address < b.dma.dma_address || address - b.dma.dma_address > b.dma.size)
++    return BM_ERR_FAILURE;
++  uint32_t offset = address - b.dma.dma_address;
++  if (size > b.dma.size - offset)
++    return BM_ERR_FAILURE;
++  int ret = to_device ? sg2002_tpu_write(b.fd, &b.dma, offset, b.cpu + offset, size) :
++                        sg2002_tpu_read(b.fd, &b.dma, offset, b.cpu + offset, size);
++  return ret ? BM_ERR_FAILURE : BM_SUCCESS;
++}
++
++// Resolve the model's eight array bases into TDMA global addresses. The kernel
++// accepts buffer handles as bases; model bases may point inside an allocation.
++bool relocate_tdma(uint32_t *words, const uint64_t base[8]) {
++  unsigned direction = (words[0] >> 6) & 3;
++  if (direction == 0 || direction == 2) {
++    unsigned index = (words[3] >> 16) & 7;
++    uint64_t address = words[12] | (uint64_t(words[13] >> 24) << 32);
++    if (base[index] > UINT32_MAX || address > UINT32_MAX - base[index])
++      return false;
++    address += base[index];
++    words[12] = address;
++    words[13] &= 0x00ffffff;
++    words[3] &= ~(7u << 16);
++  }
++  if (direction == 1 || direction == 2) {
++    unsigned index = (words[3] >> 20) & 7;
++    uint64_t address = words[11] | (uint64_t((words[13] >> 16) & 255) << 32);
++    if (base[index] > UINT32_MAX || address > UINT32_MAX - base[index])
++      return false;
++    address += base[index];
++    words[11] = address;
++    words[13] &= 0xff00ffff;
++    words[3] &= ~(7u << 20);
++  }
++  return true;
++}
++} // namespace
++
++bmerr_t CviDeviceMem::mem_alloc(bmdev_t dev, size_t size, uint64_t *paddr,
++                               uint8_t **vaddr, int *id) {
++  if (!size || size > UINT32_MAX)
++    return BM_ERR_FAILURE;
++  std::lock_guard<std::mutex> guard(buffers_lock);
++  if (next_buffer > INT_MAX)
++    return BM_ERR_FAILURE;
++  Buffer b = {dev->dev_fd, {}, nullptr};
++  if (sg2002_tpu_alloc(b.fd, size, &b.dma))
++    return BM_ERR_FAILURE;
++  void *memory = nullptr;
++  if (posix_memalign(&memory, 4096, b.dma.size)) {
++    sg2002_tpu_free(b.fd, &b.dma);
++    return BM_ERR_FAILURE;
++  }
++  b.cpu = static_cast<uint8_t *>(memory);
++  memset(b.cpu, 0, b.dma.size);
++  *id = next_buffer++;
++  *paddr = b.dma.dma_address;
++  *vaddr = b.cpu;
++  buffers.emplace(*id, b);
++  return BM_SUCCESS;
++}
++
++void CviDeviceMem::close_buffers(bmdev_t dev) {
++  std::lock_guard<std::mutex> guard(buffers_lock);
++  for (auto it = buffers.begin(); it != buffers.end();) {
++    if (it->second.fd == dev->dev_fd) {
++      free(it->second.cpu);
++      it = buffers.erase(it);
++    } else {
++      ++it;
++    }
++  }
++  // Closing the file releases its kernel allocations after any active job.
++  close(dev->dev_fd);
++}
++
++bmerr_t CviDeviceMem::mem_free(uint8_t *vaddr, size_t, int id) {
++  std::lock_guard<std::mutex> guard(buffers_lock);
++  auto it = buffers.find(id);
++  if (it == buffers.end() || it->second.cpu != vaddr)
++    return BM_ERR_FAILURE;
++  int ret = sg2002_tpu_free(it->second.fd, &it->second.dma);
++  free(it->second.cpu);
++  buffers.erase(it);
++  return ret ? BM_ERR_FAILURE : BM_SUCCESS;
++}
++
++bmerr_t CviDeviceMem::mem_flush_ext(bmdev_t dev, int id, uint64_t address, size_t size) {
++  return transfer(dev, id, address, size, true);
++}
++bmerr_t CviDeviceMem::mem_invld_ext(bmdev_t dev, int id, uint64_t address, size_t size) {
++  return transfer(dev, id, address, size, false);
++}
++bmerr_t CviDeviceMem::mem_flush_fd(bmdev_t dev, int id) {
++  uint64_t address;
++  uint32_t size;
++  {
++    std::lock_guard<std::mutex> guard(buffers_lock);
++    auto it = buffers.find(id);
++    if (it == buffers.end()) return BM_ERR_FAILURE;
++    address = it->second.dma.dma_address;
++    size = it->second.dma.size;
++  }
++  return transfer(dev, id, address, size, true);
++}
++bmerr_t CviDeviceMem::mem_invld_fd(bmdev_t dev, int id) {
++  uint64_t address;
++  uint32_t size;
++  {
++    std::lock_guard<std::mutex> guard(buffers_lock);
++    auto it = buffers.find(id);
++    if (it == buffers.end()) return BM_ERR_FAILURE;
++    address = it->second.dma.dma_address;
++    size = it->second.dma.size;
++  }
++  return transfer(dev, id, address, size, false);
++}
++
++bmerr_t CviDeviceMem::submit_dmabuf(bmdev_t dev, int id, uint32_t) {
++  std::lock_guard<std::mutex> guard(buffers_lock);
++  auto it = buffers.find(id);
++  if (it == buffers.end() || it->second.fd != dev->dev_fd)
++    return BM_ERR_FAILURE;
++  Buffer &b = it->second;
++  if (b.dma.size < sizeof(dma_hdr_t))
++    return BM_ERR_FAILURE;
++  const dma_hdr_t *header = reinterpret_cast<const dma_hdr_t *>(b.cpu);
++  if (header->dmabuf_magic_m != 0xb5b5 ||
++      header->dmabuf_size > b.dma.size ||
++      !header->cpu_desc_count || header->cpu_desc_count > SG2002_TPU_MAX_BATCH ||
++      header->cpu_desc_count > (b.dma.size - sizeof(*header)) / sizeof(cvi_cpu_desc_t) ||
++      header->pmubuf_size)
++    return BM_ERR_FAILURE;
++  uint64_t bases[8];
++  const uint32_t *parts = &header->arraybase_0_L;
++  for (unsigned i = 0; i < 8; i++)
++    bases[i] = parts[2 * i] | (uint64_t(parts[2 * i + 1]) << 32);
++  const auto *segments = reinterpret_cast<const cvi_cpu_desc_t *>(b.cpu + sizeof(*header));
++  std::vector<sg2002_tpu_submit> jobs;
++  std::vector<std::vector<uint32_t>> descriptors(header->cpu_desc_count);
++  for (unsigned segment = 0; segment < header->cpu_desc_count; segment++) {
++    const auto &d = segments[segment];
++    if (d.op_type != 2) { // CPU_OP_SYNC; CPU opcodes are not silently skipped.
++      fprintf(stderr, "Unsupported TPU CPU descriptor opcode %u\n", d.op_type);
++      return BM_ERR_FAILURE;
++    }
++    uint32_t tiu_count = d.num_tiu & 0xffff, tdma_count = d.num_tdma & 0xffff;
++    uint64_t tiu_address = uint64_t(d.offset_tiu) << 8;
++    uint64_t tdma_address = uint64_t(d.offset_tdma) << 6;
++    size_t tiu_bytes = size_t(tiu_count) * 112, tdma_bytes = size_t(tdma_count) * 64;
++    auto in_range = [&b](uint64_t address, size_t bytes) {
++      return address >= b.dma.dma_address && address - b.dma.dma_address <= b.dma.size &&
++             bytes <= b.dma.size - (address - b.dma.dma_address);
++    };
++    if ((tiu_count && !in_range(tiu_address, tiu_bytes)) ||
++        (tdma_count && !in_range(tdma_address, tdma_bytes)))
++      return BM_ERR_FAILURE;
++    if (!tiu_count && !tdma_count)
++      continue;
++    auto &tdma = descriptors[segment];
++    tdma.resize(tdma_count * 16);
++    if (tdma_count)
++      memcpy(tdma.data(), b.cpu + (tdma_address - b.dma.dma_address), tdma_bytes);
++    for (unsigned i = 0; i < tdma_count; i++)
++      if (!relocate_tdma(&tdma[i * 16], bases))
++        return BM_ERR_FAILURE;
++    sg2002_tpu_submit job = {};
++    job.tiu = tiu_count ? reinterpret_cast<uintptr_t>(b.cpu + (tiu_address - b.dma.dma_address)) : 0;
++    job.tdma = reinterpret_cast<uintptr_t>(tdma.data());
++    job.tiu_count = tiu_count;
++    job.tdma_count = tdma_count;
++    jobs.push_back(job);
++  }
++  if (jobs.empty())
++    return BM_ERR_FAILURE;
++  sg2002_tpu_batch batch = {};
++  batch.jobs = reinterpret_cast<uintptr_t>(jobs.data());
++  batch.count = jobs.size();
++  if (ioctl(dev->dev_fd, SG2002_TPU_BATCH, &batch)) {
++    perror("SG2002 TPU model submission");
++    return BM_ERR_FAILURE;
++  }
++  return BM_SUCCESS;
++}
++
++// Submission completes synchronously; failures are returned by submit_dmabuf.
++bmerr_t CviDeviceMem::wait_dmabuf(bmdev_t, uint32_t) { return BM_SUCCESS; }
++bmerr_t CviDeviceMem::reopen_dev(bmdev_t, int) { return BM_ERR_FAILURE; }

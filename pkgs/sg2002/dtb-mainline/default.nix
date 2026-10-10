@@ -19,6 +19,7 @@
 , linuxSrc
 , python3
 , writeText
+, patch
 ,
 }:
 let
@@ -30,10 +31,11 @@ let
   buildDtb = name: overlays:
     runCommand "${name}.dtb"
       {
-        nativeBuildInputs = [ dtc gcc ];
+        nativeBuildInputs = [ dtc gcc patch ];
       } ''
       tar -xf ${linuxSrc}
       SRC=$(echo linux-*/)
+      patch -d "$SRC" -p1 < ${../linux-mainline/patches/0091-riscv-dts-sophgo-describe-sg2002-tpu.patch}
       DTS=$SRC/arch/riscv/boot/dts/sophgo/sg2002-licheerv-nano-b.dts
 
       cat "$DTS" ${lib.concatMapStringsSep " " (p: "${p}") overlays} \

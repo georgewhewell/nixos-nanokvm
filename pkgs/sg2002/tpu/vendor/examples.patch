@@ -1,0 +1,243 @@
+diff --git a/samples/classifier_fused_preprocess/classifier_fused_preprocess.cpp b/samples/classifier_fused_preprocess/classifier_fused_preprocess.cpp
+index f8859a2..0109742 100644
+--- a/samples/classifier_fused_preprocess/classifier_fused_preprocess.cpp
++++ b/samples/classifier_fused_preprocess/classifier_fused_preprocess.cpp
+@@ -4,17 +4,18 @@
+ #include <numeric>
+ #include <cviruntime.h>
+ #include <opencv2/opencv.hpp>
++#include "../sg2002_forward.h"
+ 
+ 
+ #define IMG_RESIZE_DIMS 256
+ 
+ static void usage(char **argv) {
+   printf("Usage:\n");
+-  printf("   %s cvimodel image.jpg label_file\n", argv[0]);
++  printf("   %s cvimodel image.jpg label_file [repeats]\n", argv[0]);
+ }
+ 
+ int main(int argc, char **argv) {
+-  if (argc != 4) {
++  if (argc != 4 && argc != 5) {
+     usage(argv);
+     exit(-1);
+   }
+@@ -46,6 +47,15 @@ int main(int argc, char **argv) {
+   int32_t height = shape.dim[2];
+   int32_t width = shape.dim[3];
+ 
++  if (input_num != 1 || output_num != 1 || shape.dim[0] != 1 || shape.dim[1] != 3 ||
++      (height != 224 && height != 256) || width != height || input->fmt != CVI_FMT_UINT8 ||
++      input->pixel_format != CVI_NN_PIXEL_BGR_PLANAR || input->aligned ||
++      input->mem_size != size_t(3 * height * width) || output->fmt != CVI_FMT_FP32) {
++    fprintf(stderr, "Expected fused BGR_PLANAR 224/256 square byte input and FP32 classifier output\n");
++    CVI_NN_CleanupModel(model);
++    return 1;
++  }
++
+   // imread
+   cv::Mat image;
+   image = cv::imread(argv[2]);
+@@ -56,6 +66,7 @@ int main(int argc, char **argv) {
+ 
+   // resize
+   cv::resize(image, image, cv::Size(IMG_RESIZE_DIMS, IMG_RESIZE_DIMS)); // linear is default
++  image = image(cv::Rect((image.cols - width) / 2, (image.rows - height) / 2, width, height));
+ 
+   //Packed2Planar
+   cv::Mat channels[3];
+@@ -71,7 +82,11 @@ int main(int argc, char **argv) {
+   }
+ 
+   // run inference
+-  CVI_NN_Forward(model, input_tensors, input_num, output_tensors, output_num);
++  if (!sg2002_forward(model, input_tensors, input_num, output_tensors, output_num,
++                      argc == 5 ? argv[4] : nullptr)) {
++    CVI_NN_CleanupModel(model);
++    return 1;
++  }
+   printf("CVI_NN_Forward succeeded\n");
+ 
+   std::vector<std::string> labels;
+@@ -89,6 +104,10 @@ int main(int argc, char **argv) {
+   int32_t top_num = 5;
+   float *prob = (float *)CVI_NN_TensorPtr(output);
+   int32_t count = CVI_NN_TensorCount(output);
++  if (count < top_num || labels.size() != size_t(count)) {
++    fprintf(stderr, "Label count does not match model output\n");
++    return 1;
++  }
+   // find top-k prob and cls
+   std::vector<size_t> idx(count);
+   std::iota(idx.begin(), idx.end(), 0);
+diff --git a/samples/samples_extra/detector_yolov5_fused_preprocess/detector_yolov5_fused_preprocess.cpp b/samples/samples_extra/detector_yolov5_fused_preprocess/detector_yolov5_fused_preprocess.cpp
+index 3b52e41..500a2d1 100644
+--- a/samples/samples_extra/detector_yolov5_fused_preprocess/detector_yolov5_fused_preprocess.cpp
++++ b/samples/samples_extra/detector_yolov5_fused_preprocess/detector_yolov5_fused_preprocess.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include <opencv2/opencv.hpp>
+ #include "cviruntime.h"
++#include "../../sg2002_forward.h"
+ 
+ typedef struct {
+   float x, y, w, h;
+@@ -52,7 +53,7 @@ static float anchors_[3][3][2] = {{{10, 13}, {16, 30}, {33, 23}},
+ 
+ static void usage(char **argv) {
+   printf("Usage:\n");
+-  printf("   %s cvimodel image.jpg image_detected.jpg\n", argv[0]);
++  printf("   %s cvimodel image.jpg image_detected.jpg [repeats]\n", argv[0]);
+ }
+ 
+ template <typename T> int argmax(const T *data, size_t len, size_t stride = 1) {
+@@ -106,7 +107,7 @@ void correctYoloBoxes(detection *dets, int det_num, int image_h, int image_w,
+ 
+ void NMS(detection *dets, int *total, float thresh) {
+   if (*total) {
+-    std::sort(dets, dets + *total - 1,
++    std::sort(dets, dets + *total,
+               [](detection &a, detection &b) { return b.score < a.score; });
+     int new_count = *total;
+     for (int i = 0; i < *total; ++i) {
+@@ -204,7 +205,7 @@ int main(int argc, char **argv) {
+   int ret = 0;
+   CVI_MODEL_HANDLE model;
+ 
+-  if (argc != 4) {
++  if (argc != 4 && argc != 5) {
+     usage(argv);
+     exit(-1);
+   }
+@@ -221,9 +222,10 @@ int main(int argc, char **argv) {
+   float qscale;
+   int bbox_len = 85; // classes num + 5
+   int classes_num = 80;
+-  float conf_thresh = 0.5;
+-  float iou_thresh = 0.5;
+-  float obj_thresh = 0.5;
++  // YOLOv5 v6.0 detect.py defaults: confidence 0.25, class-aware NMS IoU 0.45.
++  // https://github.com/ultralytics/yolov5/blob/v6.0/detect.py
++  float conf_thresh = 0.25;
++  float iou_thresh = 0.45;
+ 
+   ret = CVI_NN_RegisterModel(argv[1], &model);
+   if (ret != CVI_RC_SUCCESS) {
+@@ -252,6 +254,26 @@ int main(int argc, char **argv) {
+   height = input_shape.dim[2];
+   width = input_shape.dim[3];
+ 
++  if (input_num != 1 || output_num != 3 || input_shape.dim[0] != 1 ||
++      input_shape.dim[1] != 3 || input->fmt != CVI_FMT_UINT8 || input->aligned ||
++      input->pixel_format != CVI_NN_PIXEL_RGB_PLANAR ||
++      input->mem_size != size_t(3 * height * width)) {
++    fprintf(stderr, "Expected fused RGB_PLANAR byte input and three YOLOv5 heads\n");
++    CVI_NN_CleanupModel(model);
++    free(output_shape);
++    return 1;
++  }
++  for (int i = 0; i < 3; i++) {
++    if (output[i].fmt != CVI_FMT_FP32 || output_shape[i].dim[0] != 1 ||
++        output_shape[i].dim[1] != 255 || output_shape[i].dim[2] != height / (8 << i) ||
++        output_shape[i].dim[3] != width / (8 << i)) {
++      fprintf(stderr, "Expected FP32 YOLOv5 heads in stride 8,16,32 order\n");
++      CVI_NN_CleanupModel(model);
++      free(output_shape);
++      return 1;
++    }
++  }
++
+   // imread
+   cv::Mat image;
+   image = cv::imread(argv[2]);
+@@ -293,7 +315,12 @@ int main(int argc, char **argv) {
+   }
+ 
+   // run inference
+-  CVI_NN_Forward(model, input_tensors, input_num, output_tensors, output_num);
++  if (!sg2002_forward(model, input_tensors, input_num, output_tensors, output_num,
++                      argc == 5 ? argv[4] : nullptr)) {
++    CVI_NN_CleanupModel(model);
++    free(output_shape);
++    return 1;
++  }
+ 
+   // do post proprocess
+   int det_num = 0;
+@@ -336,12 +363,16 @@ int main(int argc, char **argv) {
+     int y2 = (b.y + b.h / 2);
+     cv::rectangle(cloned, cv::Point(x1, y1), cv::Point(x2, y2),
+                   cv::Scalar(255, 255, 0), 3, 8, 0);
+-    cv::putText(cloned, coco_names[dets[i].cls], cv::Point(x1, y1),
++    cv::putText(cloned, cv::format("%s %.2f", coco_names[dets[i].cls], dets[i].score),
++                cv::Point(x1, y1),
+                 cv::FONT_HERSHEY_DUPLEX, 1.0, cv::Scalar(0, 0, 255), 2);
+   }
+ 
+   // save or show picture
+-  cv::imwrite(argv[3], cloned);
++  if (!cv::imwrite(argv[3], cloned)) {
++    fprintf(stderr, "Failed to write detection image\n");
++    return 1;
++  }
+ 
+   printf("------\n");
+   printf("%d objects are detected\n", det_num);
+diff --git a/samples/sg2002_forward.h b/samples/sg2002_forward.h
+new file mode 100644
+index 0000000..c500d9f
+--- /dev/null
++++ b/samples/sg2002_forward.h
+@@ -0,0 +1,51 @@
++// SPDX-License-Identifier: MIT
++// Measure synchronous hardware inference and check repeat determinism.
++#pragma once
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <ctime>
++#include <vector>
++#include <cviruntime.h>
++
++static double elapsed(const timespec &a, const timespec &b) {
++  return (b.tv_sec - a.tv_sec) * 1000.0 + (b.tv_nsec - a.tv_nsec) / 1000000.0;
++}
++
++static bool sg2002_forward(CVI_MODEL_HANDLE model, CVI_TENSOR *inputs, int input_num,
++                          CVI_TENSOR *outputs, int output_num, const char *repeat_arg) {
++  char *end = nullptr;
++  unsigned long repeats = repeat_arg ? strtoul(repeat_arg, &end, 10) : 1;
++  if (!repeats || repeats > 10000 || (end && *end)) {
++    fprintf(stderr, "repeats must be 1..10000\n");
++    return false;
++  }
++  std::vector<std::vector<unsigned char>> reference(output_num);
++  double wall = 0, cpu = 0;
++  for (unsigned long i = 0; i < repeats; i++) {
++    timespec a, b, ca, cb;
++    clock_gettime(CLOCK_MONOTONIC, &a);
++    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ca);
++    int ret = CVI_NN_Forward(model, inputs, input_num, outputs, output_num);
++    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cb);
++    clock_gettime(CLOCK_MONOTONIC, &b);
++    if (ret != CVI_RC_SUCCESS) {
++      fprintf(stderr, "CVI_NN_Forward failed: %d\n", ret);
++      return false;
++    }
++    wall += elapsed(a, b);
++    cpu += elapsed(ca, cb);
++    for (int t = 0; t < output_num; t++) {
++      auto ptr = static_cast<unsigned char *>(CVI_NN_TensorPtr(&outputs[t]));
++      size_t bytes = outputs[t].mem_size;
++      if (!i) reference[t].assign(ptr, ptr + bytes);
++      else if (memcmp(ptr, reference[t].data(), bytes)) {
++        fprintf(stderr, "Output %d changed on repeat %lu\n", t, i);
++        return false;
++      }
++    }
++  }
++  printf("TPU inference: %lu repeats, %.3f ms wall, %.3f ms process CPU per inference\n",
++         repeats, wall / repeats, cpu / repeats);
++  return true;
++}
