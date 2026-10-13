@@ -26,6 +26,32 @@ On a PicoClaw (single 1 GHz core, Linux 7.2.8) the root is mounted 0.8 s after
 kernel start and sshd listens at 39 s instead of 63-67 s; the DHCP lease on
 Wi-Fi arrives at 67 s instead of 78 s.
 
+### First boot and downgrades
+
+`growpart.service` waits for the root label's udev device before resolving
+its parent disk. The no-initrd filesystem resize requires successful
+partition growth; an already-full partition is skipped by the existing
+size guard. Both steps are safe to repeat after an interrupted first boot.
+
+Keep this version's extlinux installer when selecting an older generation.
+Installers predating no-initrd support silently omit those generations and
+delete their unreferenced kernel files. Booting a retained initrd generation
+from the mixed menu is supported; running its old bootloader installer is
+not a safe way to preserve a no-initrd fallback.
+
+For a downgrade, use a generation containing this installer to regenerate
+the mixed menu, then use `extlinux-try-boot arm` to select the retained
+initrd entry with a known-good fallback. Do not run an older
+`switch-to-configuration boot` or `nixos-rebuild boot/switch` afterward.
+If an old installer has already rewritten the menu, rerun the compatible
+installer before arming another trial. Retain the relevant system profiles
+and store paths so their boot payloads can be recopied.
+
+The `extlinux-try-boot` VM check exercises the actual patched and old
+installers: mixed entries and payloads, trial rollback and blessing in both
+directions, the old installer's deletion, refusal to arm a missing fallback,
+and recovery by regenerating the menu with the compatible installer.
+
 ## NanoKVM-PCIe hardware test, 2026-09-18
 
 One SG2002 NanoKVM-PCIe was tested with the same firmware and root filesystem:

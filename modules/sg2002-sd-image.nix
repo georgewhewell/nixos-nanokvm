@@ -37,23 +37,10 @@
   diskDevice = config.disko.devices.disk.sg2002-sd.device;
   firmwarePart = partitionDevice diskDevice 1;
   rootPart = partitionDevice diskDevice 2;
-  upstreamExtlinuxBuilder = import (pkgs.path + "/nixos/modules/system/boot/loader/generic-extlinux-compatible/extlinux-conf-builder.nix") {
-    inherit lib pkgs;
-  };
   # The generic builder's plain `cp` may use Btrfs copy_file_range and retain
   # a Nix-store file's shared, fragmented extent map. U-Boot's Btrfs reader is
   # much less exercised than Linux's; make boot payloads independent copies.
-  targetExtlinuxBuilder = pkgs.runCommand "sg2002-extlinux-conf-builder" {} ''
-    cp ${upstreamExtlinuxBuilder} "$out"
-    substituteInPlace "$out" \
-      --replace-fail 'cp -r $src $dstTmp' 'cp --reflink=never -r $src $dstTmp' \
-      --replace-fail 'test -e $path/kernel -a -e $path/initrd' 'test -e $path/kernel' \
-      --replace-fail 'copyToKernelsDir "$path/initrd"; initrd=$result' \
-        'initrd=; if test -e $path/initrd; then copyToKernelsDir "$path/initrd"; initrd=$result; fi' \
-      --replace-fail 'echo "  INITRD ../nixos/$(basename $initrd)"' \
-        '[ -z "$initrd" ] || echo "  INITRD ../nixos/$(basename $initrd)"'
-    chmod +x "$out"
-  '';
+  targetExtlinuxBuilder = import ../lib/extlinux-conf-builder.nix { inherit lib pkgs; };
   targetExtlinuxBuilderArgs =
     "-g ${toString config.boot.loader.generic-extlinux-compatible.configurationLimit} "
     + "-t ${if config.boot.loader.timeout == null then "-1" else toString config.boot.loader.timeout}"
@@ -182,6 +169,7 @@ in {
       description = "Grow the root file system to its partition";
       wantedBy = [ "multi-user.target" ];
       after = [ "growpart.service" ];
+      requires = lib.optional config.boot.growPartition "growpart.service";
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${pkgs.btrfs-progs}/bin/btrfs filesystem resize max /";
@@ -196,6 +184,14 @@ in {
       '';
   })
   {
+    # With no stage 1 the kernel mounts / directly, before udev has made
+    # /dev/disk/by-label. growpart resolves that label to find the parent
+    # disk: wait for that specific device, not an unrelated global settle.
+    systemd.services.growpart = lib.mkIf config.boot.growPartition {
+      after = [ "dev-disk-by\\x2dlabel-NIXOS_SD.device" ];
+      requires = [ "dev-disk-by\\x2dlabel-NIXOS_SD.device" ];
+      serviceConfig.ExecCondition = [ rootPartitionNeedsGrowth ];
+    };
     # The SG2002 does not need nixpkgs' generic SD-card initrd module set.
     sg2002.initrd.pruneKernelModules = true;
     # The board-support module force-prunes the generic initrd module set, so
@@ -240,10 +236,6 @@ in {
         # console with driver debug output (AIC8800 "get tx power").
       ];
     };
-
-    systemd.services.growpart.serviceConfig.ExecCondition = [
-      rootPartitionNeedsGrowth
-    ];
 
     disko = {
       # The legacy `table` backend preserves the vendor-compatible MBR

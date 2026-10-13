@@ -1,5 +1,19 @@
 { pkgs }:
 let
+  builder = import ../lib/extlinux-conf-builder.nix { inherit pkgs; inherit (pkgs) lib; };
+  oldBuilder = import (pkgs.path + "/nixos/modules/system/boot/loader/generic-extlinux-compatible/extlinux-conf-builder.nix") {
+    inherit pkgs; inherit (pkgs) lib;
+  };
+  systemFixture = name: withInitrd: pkgs.runCommand "${name}-system" {} ''
+    mkdir -p "$out/specialisation"
+    echo ${name} > "$out/kernel"
+    echo test > "$out/nixos-version"
+    echo 'root=/dev/mmcblk0p2 rootfstype=btrfs' > "$out/kernel-params"
+    touch "$out/init"
+    ${pkgs.lib.optionalString withInitrd ''echo initrd > "$out/initrd"''}
+  '';
+  withInitrd = systemFixture "with-initrd" true;
+  withoutInitrd = systemFixture "without-initrd" false;
   configuration = pkgs.writeText "extlinux-test.conf" ''
     DEFAULT old
     LABEL old
@@ -92,5 +106,78 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"systemctl reset-failed {unit}")
         machine.fail(f"systemctl restart {unit}")
         machine.succeed("test ! -e /run/health-checked; test -s /var/lib/tryboot/state")
+
+    bootdir = "/var/lib/mixed-boot"
+    conf = f"{bootdir}/extlinux/extlinux.conf"
+    mixed_cli = f"env EXTLINUX_TRY_BOOT_CONF={conf} EXTLINUX_TRY_BOOT_STATE=/run/mixed-state {cli}"
+
+    def write_menu(builder, default):
+        machine.succeed(f"{builder} -t 1 -g 2 -r -c {default} -d {bootdir}")
+
+    def entries():
+        result = {}
+        label = None
+        for line in machine.succeed(f"cat {conf}").splitlines():
+            fields = line.split()
+            if not fields:
+                continue
+            if fields[0] == "LABEL":
+                label = fields[1]
+                result[label] = {}
+            elif label and fields[0] in ("LINUX", "INITRD", "APPEND"):
+                result[label][fields[0]] = " ".join(fields[1:])
+        return result
+
+    def running(system):
+        machine.succeed(f"echo init={system}/init > /run/test-cmdline")
+
+    with subtest("the real installer retains both kinds of generation and their payloads"):
+        machine.succeed("ln -s ${withInitrd} /nix/var/nix/profiles/system-9001-link")
+        machine.succeed("ln -s ${withoutInitrd} /nix/var/nix/profiles/system-9002-link")
+        write_menu("${builder}", "${withoutInitrd}")
+        menu = entries()
+        assert set(menu) == {"nixos-default", "nixos-9001-default", "nixos-9002-default"}
+        assert "INITRD" in menu["nixos-9001-default"]
+        assert "INITRD" not in menu["nixos-default"]
+        assert "INITRD" not in menu["nixos-9002-default"]
+        for entry in menu.values():
+            for key in ("LINUX", "INITRD"):
+                if key in entry:
+                    machine.succeed(f"test -s {bootdir}/extlinux/{entry[key]}")
+        no_initrd_kernel = menu["nixos-9002-default"]["LINUX"]
+
+    with subtest("mixed-menu trial boots roll back and bless without requiring an initrd"):
+        running("${withInitrd}")
+        machine.succeed(f"{mixed_cli} arm nixos-9002-default nixos-9001-default")
+        running("${withoutInitrd}")
+        machine.succeed(f"cp {conf} /run/mixed-menu-saved")
+        machine.succeed(f"sed -i 's/^LABEL nixos-9002-default$/LABEL missing-candidate/' {conf}")
+        machine.fail(f"{mixed_cli} is-candidate")
+        machine.succeed(f"cp /run/mixed-menu-saved {conf}")
+        machine.succeed(f"sed -i '/^LABEL nixos-9002-default/,/^$/s@${withoutInitrd}/init@${withInitrd}/init@' {conf}")
+        machine.fail(f"{mixed_cli} is-candidate")
+        machine.succeed(f"cp /run/mixed-menu-saved {conf}")
+        machine.succeed(f"{mixed_cli} is-candidate")
+        machine.succeed(f"{mixed_cli} early-rollback")
+        machine.succeed(f"grep -Fx 'DEFAULT nixos-9001-default' {conf}")
+        machine.succeed(f"{mixed_cli} bless")
+        machine.succeed(f"grep -Fx 'DEFAULT nixos-9002-default' {conf}; test ! -e /run/mixed-state")
+
+    with subtest("an older installer removes no-initrd entries and try-boot refuses the missing fallback"):
+        write_menu("${oldBuilder}", "${withInitrd}")
+        assert set(entries()) == {"nixos-default", "nixos-9001-default"}
+        machine.fail(f"test -e {bootdir}/extlinux/{no_initrd_kernel}")
+        machine.fail(f"{mixed_cli} arm nixos-default nixos-9002-default")
+        machine.succeed("test ! -e /run/mixed-state")
+
+    with subtest("using the compatible installer restores a safe downgrade menu"):
+        write_menu("${builder}", "${withInitrd}")
+        machine.succeed(f"test -s {bootdir}/extlinux/{no_initrd_kernel}")
+        machine.succeed(f"{mixed_cli} arm nixos-9001-default nixos-9002-default")
+        running("${withInitrd}")
+        machine.succeed(f"{mixed_cli} early-rollback")
+        machine.succeed(f"grep -Fx 'DEFAULT nixos-9002-default' {conf}")
+        machine.succeed(f"{mixed_cli} bless")
+        machine.succeed(f"grep -Fx 'DEFAULT nixos-9001-default' {conf}; test ! -e /run/mixed-state")
   '';
 }

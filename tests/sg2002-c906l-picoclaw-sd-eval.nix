@@ -65,6 +65,11 @@ assert builtins.elem "fbcon=nodefer" config.boot.kernelParams;
 assert builtins.elem "sg2002-c906l-framebuffer" config.sg2002.initrd.availableKernelModules;
 assert !builtins.elem "sg2002-c906l-framebuffer" config.sg2002.initrd.kernelModules;
 assert config.fileSystems."/".fsType == "btrfs";
+assert builtins.elem "dev-disk-by\\x2dlabel-NIXOS_SD.device"
+  config.systemd.services.growpart.after;
+assert builtins.elem "dev-disk-by\\x2dlabel-NIXOS_SD.device"
+  config.systemd.services.growpart.requires;
+assert builtins.elem "growpart.service" config.systemd.services.sg2002-grow-root.requires;
 assert config.boot.loader.generic-extlinux-compatible.enable;
 assert pcieConfig.boot.initrd.systemd.services.initrd-switch-root.enable;
 assert config.systemd.services."getty@".enable;

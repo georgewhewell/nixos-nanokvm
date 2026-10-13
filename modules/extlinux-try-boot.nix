@@ -211,8 +211,12 @@
 
     init_matches_state() {
       local label="$1" init="$2" expected_label="$3" expected_init="$4"
-      [ "$label" = "$expected_label" ] || return 1
-      [ "$init" = "$expected_init" ] || return 1
+      # The installer emits nixos-default and a numbered entry for the same
+      # system. /proc/cmdline identifies its init, not which alias U-Boot
+      # selected. Accept either alias, but require the recorded candidate
+      # entry to still exist and refer to the exact recorded init.
+      [ -n "$label" ] && [ "$init" = "$expected_init" ] || return 1
+      [ "$(label_init "$expected_label" 2>/dev/null || true)" = "$expected_init" ]
     }
 
     cmd_status() {
