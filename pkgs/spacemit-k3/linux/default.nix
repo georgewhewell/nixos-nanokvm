@@ -1,6 +1,7 @@
 {
   buildLinux,
   fetchFromGitHub,
+  fetchurl,
   kernelPatches,
   lib,
   ...
@@ -10,7 +11,7 @@ in
   buildLinux (
     args
     // {
-      inherit kernelPatches modDirVersion;
+      inherit modDirVersion;
       version = "${modDirVersion}-spacemit-k3";
 
       src = fetchFromGitHub {
@@ -19,6 +20,15 @@ in
         rev = "3709ed51967962fd02d6b4e5a80234719693931f";
         hash = "sha256-itqxXJCogLHbGucVHCDVwGkoqunQjJs0i1ZfvkuUtP4=";
       };
+
+      # Upstream GCC 16 compatibility fix; the vendor 6.18.3 tree predates it.
+      kernelPatches = kernelPatches ++ [{
+        name = "gcc-plugins-gcc16";
+        patch = fetchurl {
+          url = "https://github.com/torvalds/linux/commit/905c559e51497b8bfdbb68df8be56d2f70f0de8e.patch";
+          hash = "sha256-u8JlNOjG5DoH5/iKWxWQKTNrULIR2v00p6cPkqPdK/0=";
+        };
+      }];
 
       defconfig = "k3_bianbu_defconfig";
 
