@@ -49,6 +49,7 @@
       booted-label
       set-default <label>
       arm <candidate-label> [fallback-label]
+      auto-arm
       early-rollback
       is-candidate
       bless
@@ -211,8 +212,12 @@
 
     init_matches_state() {
       local label="$1" init="$2" expected_label="$3" expected_init="$4"
-      [ "$label" = "$expected_label" ] || return 1
-      [ "$init" = "$expected_init" ] || return 1
+      # The installer emits nixos-default and a numbered entry for the same
+      # system. /proc/cmdline identifies its init, not which alias U-Boot
+      # selected. Accept either alias, but require the recorded candidate
+      # entry to still exist and refer to the exact recorded init.
+      [ -n "$label" ] && [ "$init" = "$expected_init" ] || return 1
+      [ "$(label_init "$expected_label" 2>/dev/null || true)" = "$expected_init" ]
     }
 
     cmd_status() {
@@ -250,6 +255,21 @@
       write_state "$candidate" "$fallback" "armed"
       set_default "$candidate"
       log "armed $candidate with fallback $fallback"
+    }
+
+    cmd_auto_arm() {
+      local booted default default_init booted_init_path
+      [ -e "$cmdline" ] && [ -e "$conf" ] || return 0
+      booted="$(booted_label 2>/dev/null || true)"
+      default="$(current_default 2>/dev/null || true)"
+      [ -n "$booted" ] && [ -n "$default" ] || return 0
+      default_init="$(label_init "$default" 2>/dev/null || true)"
+      booted_init_path="$(booted_init 2>/dev/null || true)"
+      [ -n "$default_init" ] && [ -n "$booted_init_path" ] || return 0
+      # Default and numbered labels can name the same system. Re-arming
+      # during its boot would replace the real fallback with that alias.
+      [ "$default_init" != "$booted_init_path" ] || return 0
+      cmd_arm "$default" "$booted"
     }
 
     cmd_early_rollback() {
@@ -331,6 +351,7 @@
         set_default "$1"
         ;;
       arm) cmd_arm "$@" ;;
+      auto-arm) cmd_auto_arm "$@" ;;
       early-rollback) cmd_early_rollback "$@" ;;
       is-candidate) cmd_is_candidate "$@" ;;
       bless) cmd_bless "$@" ;;
@@ -387,13 +408,7 @@ in {
     system.build.extlinuxTryBoot = tryBoot;
 
     system.activationScripts.extlinuxTryBootAutoArm = lib.mkIf cfg.autoArmOnSwitch (lib.stringAfter ["specialfs"] ''
-      if [ -e /proc/cmdline ] && [ -e ${lib.escapeShellArg cfg.configPath} ]; then
-        booted="$(${tryBoot}/bin/extlinux-try-boot booted-label 2>/dev/null || true)"
-        default="$(${tryBoot}/bin/extlinux-try-boot current-default 2>/dev/null || true)"
-        if [ -n "$booted" ] && [ -n "$default" ] && [ "$default" != "$booted" ]; then
-          ${tryBoot}/bin/extlinux-try-boot arm "$default" "$booted"
-        fi
-      fi
+      ${tryBoot}/bin/extlinux-try-boot auto-arm
     '');
 
     systemd.services.extlinux-try-boot-rollback = {
