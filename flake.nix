@@ -218,57 +218,6 @@
       boardSystems = walkCatalog mkBoard catalog;
       boardModules = walkCatalog mkBoardModule catalog;
 
-      k3BoardModules = {
-        k3."pico-itx" = {
-          uefi = {
-            imports = [
-              self.nixosModules.overlay
-              ./boards/spacemit-k3-pico-itx.nix
-              ./modules/spacemit-k3-uefi-boot.nix
-              ./modules/spacemit-k3-usb-gadget.nix
-              ({ ... }: { spacemit.k3.usbGadget.enable = true; })
-            ];
-          };
-          "recovery-sd" = {
-            imports = [
-              self.nixosModules.overlay
-              ./modules/spacemit-k3-recovery-sd-image.nix
-            ];
-          };
-          "kexec-installer" = {
-            imports = [
-              self.nixosModules.overlay
-              ./modules/spacemit-k3-kexec-installer.nix
-            ];
-          };
-          "initrd-rescue" = {
-            imports = [
-              self.nixosModules.overlay
-              ./modules/spacemit-k3-initrd-rescue.nix
-            ];
-          };
-        };
-      };
-
-      k3BoardSystems =
-        let
-          mkK3System = module:
-            nixpkgs.lib.nixosSystem {
-              modules = [
-                module
-                ({ ... }: { spacemit.k3.authorizedKeys = rootAuthorizedKeys; })
-              ];
-            };
-        in
-        {
-          k3."pico-itx"."recovery-sd" =
-            mkK3System k3BoardModules.k3."pico-itx"."recovery-sd";
-          k3."pico-itx"."kexec-installer" =
-            mkK3System k3BoardModules.k3."pico-itx"."kexec-installer";
-          k3."pico-itx"."initrd-rescue" =
-            mkK3System k3BoardModules.k3."pico-itx"."initrd-rescue";
-        };
-
       # A T-Head C906 sandbox on `qemu-system-riscv64 -M virt`, booting
       # the *same* sg2002-kernel-mainline the boards boot. Deliberately
       # not a catalog entry: it imports no platform/cv181x.nix, sets no
@@ -283,9 +232,8 @@
 
       # `nixosConfigurations` is a standard flake schema: every direct child
       # must be a standalone NixOS system. Publish the self-contained mainline
-      # systems under stable dash-joined names. Vendor systems and the K3
-      # initrd rescue require site inputs; they remain available as modules and
-      # legacyPackages artifacts without pretending to be standalone configs.
+      # systems under stable dash-joined names. Vendor systems require site
+      # inputs and remain available as modules and legacyPackages artifacts.
       flatBoardSystems =
         builtins.listToAttrs
           (map
@@ -295,8 +243,6 @@
             })
             (builtins.filter (entry: entry.kernel == "mainline") catalog))
         // {
-          k3-pico-itx-recovery-sd = k3BoardSystems.k3."pico-itx"."recovery-sd";
-          k3-pico-itx-kexec-installer = k3BoardSystems.k3."pico-itx"."kexec-installer";
           qemu-c906-virt = qemuVirtSystem;
         };
 
@@ -319,20 +265,13 @@
           self.nixosModules.overlay
         ];
       };
-      nixosModules.spacemitK3 = import ./platform/spacemit-k3.nix;
-      nixosModules.spacemitK3UefiBoot = import ./modules/spacemit-k3-uefi-boot.nix;
-      nixosModules.spacemitK3UsbGadget = import ./modules/spacemit-k3-usb-gadget.nix;
-      nixosModules.spacemitK3UfsDisko = import ./modules/spacemit-k3-ufs-disko.nix;
-      nixosModules.spacemitK3RecoverySdImage = import ./modules/spacemit-k3-recovery-sd-image.nix;
-      nixosModules.spacemitK3KexecInstaller = import ./modules/spacemit-k3-kexec-installer.nix;
-      nixosModules.spacemitK3InitrdRescue = import ./modules/spacemit-k3-initrd-rescue.nix;
       # Every catalog entry as a plain module. Consumers import e.g.
       # `nixosModules.boards.pcie.mainline.initrd.default` into their own
       # lib.nixosSystem to make the board a regular deployment member; the
       # module list is self-contained (no specialArgs required), so
       # Colmena-style re-instantiation from `_module.args.modules`
       # works without reconstructing anything.
-      nixosModules.boards = lib.recursiveUpdate boardModules k3BoardModules;
+      nixosModules.boards = boardModules;
 
       nixosConfigurations = flatBoardSystems;
 
@@ -361,16 +300,9 @@
                     (artifactBuilder.${entry.artifact} entry)))
               { }
               catalog;
-
-          k3PackagesTree = {
-            k3."pico-itx"."recovery-sd" =
-              k3BoardSystems.k3."pico-itx"."recovery-sd".config.system.build.sdImage;
-            k3."pico-itx"."kexec-installer" =
-              k3BoardSystems.k3."pico-itx"."kexec-installer".config.system.build.kexecInstallerTarball;
-          };
         in
         (lib.optionalAttrs withBoardMatrix {
-          boards = lib.recursiveUpdate boardsTree k3PackagesTree;
+          boards = boardsTree;
         })
         // {
           # Convenience: surface the underlying packages so callers can
@@ -461,18 +393,9 @@
             sg2002-uboot-mainline-fastboot
             sg2002-uboot-mainline-fastboot-c906l
             sg2002-uboot-mainline-picoclaw-splash
-            spacemit-k3-fsbl
-            spacemit-k3-linux
-            spacemit-k3-raw-fastboot-boot
-            spacemit-k3-uefi-blobs
             sophgo-host-tools
             ;
           default = pkgs.nanokvm-server;
-        }
-        // lib.optionalAttrs withBoardMatrix {
-          # This helper executes on the K3 target; expose an actual riscv64
-          # derivation instead of lying about the x86 host platform.
-          spacemit-k3-flash-uefi = pkgs.pkgsCross.riscv64.spacemit-k3-flash-uefi;
         });
 
       # `packages` must contain flat derivations. Nix installable lookup falls

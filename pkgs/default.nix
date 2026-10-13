@@ -1,12 +1,11 @@
 # Overlay for everything this flake adds to nixpkgs.
 #
-# Three halves:
-#   1. `spacemit-k3-*` — board-support for SpacemiT K3 systems.
-#   2. `sg2002-*` — board-support for the Sophgo CV181x family
+# Two package families:
+#   1. `sg2002-*` — board-support for the Sophgo CV181x family
 #      (kernel builds, FIP, OpenSBI, U-Boot, AIC8800 driver/firmware,
 #      USB-recovery tool, DTBs). Inlined here from nixos-sg2002 so
 #      this repo is self-contained.
-#   3. `nanokvm-*` — the userspace bits (the Go server, the web
+#   2. `nanokvm-*` — the userspace bits (the Go server, the web
 #      bundle, the erofs rootfs builder, the kexec payload format)
 #      that turn a CV181x board into a working KVM.
 { inputs
@@ -101,22 +100,6 @@ in
           '';
         })
     else prev.vmtouch;
-
-  # -----------------------------------------------------------------
-  # spacemit-k3-* (board support)
-  # -----------------------------------------------------------------
-
-  "spacemit-k3-linux" = cross.callPackage ./spacemit-k3/linux {
-    kernelPatches = [ ];
-  };
-  "linuxPackages_spacemit-k3" = cross.linuxPackagesFor final."spacemit-k3-linux";
-  "spacemit-k3-fsbl" = cross.callPackage ./spacemit-k3/fsbl { };
-  "spacemit-k3-rtw89-firmware" = final.callPackage ./spacemit-k3/rtw89-firmware { };
-  "spacemit-k3-uefi-blobs" = final.callPackage ./spacemit-k3/uefi-blobs { };
-  "spacemit-k3-raw-fastboot-boot" = final.callPackage ./spacemit-k3/raw-fastboot-boot { };
-  "spacemit-k3-flash-uefi" = final.callPackage ./spacemit-k3/flash-uefi {
-    uefiBlobs = final."spacemit-k3-uefi-blobs";
-  };
 
   # -----------------------------------------------------------------
   # nanokvm-* (userspace KVM stack)

@@ -100,7 +100,8 @@ RAM-only composition. Persistent consumers can use the corresponding `sd`
 module or compose the hardware modules with their own profile; do not layer a
 root filesystem onto the initrd-only profile. `nixosModules.default` still exposes the
 NanoKVM service and package overlay for other consuming configurations.
-SpacemiT K3 outputs are unchanged by this SG2002 separation.
+Board support is limited to SG2002/CV181x and its C906 test VM.
+Other platforms, including SpacemiT K3, belong in nixos-hardware.
 
 ## Layout and checks
 
