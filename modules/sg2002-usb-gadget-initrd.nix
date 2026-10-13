@@ -113,7 +113,14 @@
     mkdir -p "$G/strings/0x409"
     echo "${gadgetCfg.product}"      > "$G/strings/0x409/product"
     echo "${gadgetCfg.manufacturer}" > "$G/strings/0x409/manufacturer"
-    echo "${gadgetCfg.serial}"       > "$G/strings/0x409/serialnumber"
+    # Prefer the eFuse UID (Sipeed's device key) so hosts can tell boards
+    # apart; the configured serial covers kernels without the cell.
+    serial=${lib.escapeShellArg gadgetCfg.serial}
+    uid=/sys/bus/nvmem/devices/sg2002-efuse0/cells/uid@c,0
+    if [ -r "$uid" ]; then
+      serial=$(od -An -tx4 "$uid" | tr -d ' \n')
+    fi
+    echo "$serial" > "$G/strings/0x409/serialnumber"
 
     ${lib.optionalString canSetupNetwork ''
     if [ "$want_network" = 1 ]; then

@@ -36,6 +36,7 @@ in [
   (sd "picoclaw" "licheerv-nano-picoclaw" [ "c906l-lcd" ]
     "sd-image-picoclaw-c906l" [ ] [ ])
   (sd "pcie" "nanokvm-pcie" [ ] "sd-image-mainline" [ ] [ ])
+  (sd "cube" "nanokvm-cube" [ ] "sd-image-mainline" [ ] [ ])
   (sd "licheerv" "licheerv-nano-w" [ ] "sd-image-mainline"
     [ ] [ ({ pkgs, ... }: {
       sg2002.fdt = pkgs.sg2002-dtb-mainline-eth;

@@ -355,6 +355,17 @@ def translate_one(resource: Range, bus: Node) -> Range | None:
     return None
 
 
+def enclosing_controller(bus: Node) -> bool:
+    """Whether bus, or a container reached without ranges, has its own reg."""
+
+    current = bus
+    while current.parent is not None and "ranges" not in current.properties:
+        if decode_reg(current):
+            return True
+        current = current.parent
+    return False
+
+
 def physical_resource(resource: Range, node: Node) -> Range | None:
     current = resource
     if node.parent is None:
@@ -363,10 +374,11 @@ def physical_resource(resource: Range, node: Node) -> Range | None:
     while bus.parent is not None:
         translated = translate_one(current, bus)
         if translated is None:
-            if "ranges" not in bus.properties and decode_reg(bus):
+            if enclosing_controller(bus):
                 # A controller without ranges does not define translation for
-                # child selectors/windows.  Its own enabled aperture is the
-                # enclosing Linux claim and is checked separately.
+                # child selectors/windows, including those in reg-less
+                # containers such as nvmem-layout.  Its own enabled aperture
+                # is the enclosing Linux claim and is checked separately.
                 return None
             raise LeaseGuardError(
                 f"cannot translate enabled node {node.path} MMIO through {bus.path}"

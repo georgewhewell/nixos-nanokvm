@@ -1,0 +1,43 @@
+From: George Whewell <georgerw@gmail.com>
+Subject: [PATCH] dt-bindings: iio: adc: sophgo: describe channel consumers
+
+The CV1800B ADC is used by IIO consumers such as iio-hwmon. Describe its
+single channel argument and provide it in the SoC node, rather than
+requiring a board-specific property rejected by the binding.
+
+Signed-off-by: George Whewell <georgerw@gmail.com>
+---
+diff --git a/Documentation/devicetree/bindings/iio/adc/sophgo,cv1800b-saradc.yaml b/Documentation/devicetree/bindings/iio/adc/sophgo,cv1800b-saradc.yaml
+index f652b98..6cc9324 100644
+--- a/Documentation/devicetree/bindings/iio/adc/sophgo,cv1800b-saradc.yaml
++++ b/Documentation/devicetree/bindings/iio/adc/sophgo,cv1800b-saradc.yaml
+@@ -27,6 +27,9 @@ properties:
+   clocks:
+     maxItems: 1
+ 
++  '#io-channel-cells':
++    const: 1
++
+   '#address-cells':
+     const: 1
+ 
+@@ -66,6 +69,7 @@ examples:
+         reg = <0x030f0000 0x1000>;
+         clocks = <&clk CLK_SARADC>;
+         interrupts = <100 IRQ_TYPE_LEVEL_HIGH>;
++        #io-channel-cells = <1>;
+         #address-cells = <1>;
+         #size-cells = <0>;
+ 
+diff --git a/arch/riscv/boot/dts/sophgo/cv180x.dtsi b/arch/riscv/boot/dts/sophgo/cv180x.dtsi
+index ecafdee..600f3e1 100644
+--- a/arch/riscv/boot/dts/sophgo/cv180x.dtsi
++++ b/arch/riscv/boot/dts/sophgo/cv180x.dtsi
+@@ -165,6 +165,7 @@ saradc: adc@30f0000 {
+ 			reg = <0x030f0000 0x1000>;
+ 			clocks = <&clk CLK_SARADC>;
+ 			interrupts = <SOC_PERIPHERAL_IRQ(84) IRQ_TYPE_LEVEL_HIGH>;
++			#io-channel-cells = <1>;
+ 			#address-cells = <1>;
+ 			#size-cells = <0>;
+ 			status = "disabled";

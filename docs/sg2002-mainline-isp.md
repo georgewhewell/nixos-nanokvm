@@ -25,9 +25,15 @@ releasing DMA memory. Frame/DMA errors stop and error the queue.
 
 The camera DT enables VPSS as a separate V4L2 mem2mem device, with its own
 fabric-clock references. The bridge's `--isp` option requests NV21 capture and
-imports that allocation into VPSS, which scales and writes NV12 directly into
-the encoder's DMA-BUF. It defaults to quarter resolution (640×360 for GC4653);
-`--size half` selects 1280×720. No CPU demosaic/conversion runs in this mode.
+imports that allocation into VPSS, which scales it into an NV12 DMA-BUF shared
+with Coda. Demosaic, scaling and encoding run in hardware without a CPU frame
+copy. All three DMA engines live under `/soc` to inherit `dma-noncoherent`;
+placing them at the DT root incorrectly gives Coda a cached userspace output
+mapping, which can return stale H.264 bytes when a buffer is reused. The default
+is quarter resolution (640×360 for GC4653). `--size half` requests 1280×720
+at the sensor's approximately 30 fps. The camera profile reserves 40 MiB for
+media DMA, which accommodates 720p encoding with two capture buffers; the
+previous 32 MiB pool failed at capture STREAMON at that size.
 
 The bridge passes the capture colour tuple to VPSS and Coda, including the
 extended V4L2 fields. VPSS reports this tuple on both queues because its YUV
@@ -35,6 +41,17 @@ matrix is identity. This fixes V4L2 metadata, not H.264 bitstream signalling:
 Coda's current SPS crop rewrite omits VUI. Until VUI support is implemented,
 image comparisons must explicitly decode as full-range BT.601 with a linear
 transfer function; decoder defaults do not establish correct colour rendering.
+
+The bridge always uses VPSS and feeds NV12 to Coda. The CPU conversion,
+offline `--raw` mode, `--io`, `--scaler`, `--format`, and legacy positional
+output/size arguments have been removed. Use `--isp` for a Bayer camera;
+HDMI capture goes directly to VPSS. Output and size use named options.
+
+`--max-fps N` caps the hardware pipeline's processing rate. Excess capture
+frames are requeued before scaling and encoding, without copying their pixels
+or sleeping while holding a capture buffer. The source keeps its original
+frame rate; the cap limits processing rather than changing the HDMI mode or
+sensor timing. A slower source is not duplicated to reach the requested rate.
 
 ## Reversible laboratory boot
 
@@ -70,6 +87,10 @@ sg2002-h264-bridge /dev/videoX /dev/videoY \
   --frames 300 --output /tmp/isp-300.h264
 ```
 
+For 1280×720, add `--size half` to the bridge command above. Keep both buffer
+counts at two. This uses four times as many output pixels as the default
+640×360 mode without changing the sensor's frame rate.
+
 The encoder retains one synthetic priming/reference picture at the beginning
 of the stream. `--frames 300` excludes it from the live-frame limit: the file
 contains 301 decoded pictures, of which 300 must come from the sensor. Exclude
@@ -84,6 +105,69 @@ Register references are the pinned CV181x SDK's `vi_reg_fields.h`,
 `vi_reg_blocks.h`, `isp_reg.h`, and the `vi/chip/mars/vip/vi_*_ip_ctrl.c`
 implementations. The mainline patch uses explicit offsets/masks and the
 kernel's own DMA/V4L2 APIs, without the factory module ABI.
+
+## Board evidence: 2026-10-03
+
+The LicheeRV camera on strix-3 was tested with a RAM-only Linux 7.2.8 image and
+the sensor clock assignment moved onto the GC4653 node. This prevents the
+CPUFreq overlay from replacing the camera's assignment: CAM_MCLK1 now reports
+23.76 MHz (the rounded 24 MHz request), with MPLL still at 1 GHz. Five
+full-resolution RAW frames and repeated 30-frame NV21 captures completed.
+
+The original root-level media nodes incorrectly inherited the architecture's
+coherent DMA default. Coda's kernel mapping was uncached, but its userspace
+capture mapping was cached. Encoded output contained stale 64-byte cache lines
+from earlier uses of the buffer. Saved, immutable inputs reproduced this with
+both mmap and DMA-BUF NV12 input, without CSI or VPSS running. Changing only
+the output mapping to uncached made a live 300-frame stream pass strict
+software decoding; the cached A/B run failed. The NV21 staging copy had masked
+this bug.
+
+Moving Coda, VPSS and CSI under `/soc` restores the inherited
+`dma-noncoherent` setting. A fresh RAM boot with this DT and stock drivers
+passed two 300-live-frame direct NV12 runs at about 29.6 fps. Both complete
+streams passed `ffmpeg -v error -xerror`; `ffprobe` counted 301 pictures at
+640×360, including the priming picture. Offline alternating black/scene replay
+also passed 60 frames each with mmap and DMA-BUF input. A separate
+30-live-frame restart passed strict decoding, followed by a successful
+30-frame ISP-only capture. No staging copy, diagnostic sleep or modified
+kernel module was used for these final tests. DT regression checks require the
+media nodes to inherit the SoC's noncoherent setting.
+
+The 1280×720 request failed at capture STREAMON with `ENOMEM` in the original
+32 MiB media pool; the default 640×360 path restarted successfully afterwards.
+Increasing only that pool to 40 MiB in a subsequent RAM boot let two
+300-live-frame 1280×720 runs complete at 29.6 fps with two capture and two
+middle buffers. Both complete streams passed strict software decoding and
+contained 301 pictures, including the priming picture. A subsequent
+30-live-frame restart also passed strict decoding at 1280×720. This reserves
+an additional 8 MiB from the board's 256 MiB RAM; the sensor mode is unchanged.
+Stream restarts can still log CSI ECC/CRC/word-count indications, and ISP
+streamoff still reports its partial-frame reset. ISP image tuning and H.264
+VUI remain incomplete. No storage was flashed.
+
+The NanoKVM-PCIe attached to router had the same root-level CSI and VPSS
+nodes; its Coda node already inherited the correct setting. With its stock
+Linux 7.2.7 system and a 1080p60 HDMI source, a userspace probe filled the
+first 4 KiB of each mmap capture buffer before queuing it. Across 60 completed
+frames, 2,993 whole 64-byte lines still contained that pattern. A temporary
+module changed only the idle CSI and VPSS devices' DMA coherency flags to the
+noncoherent values supplied by the corrected DT. The same test then found
+zero stale lines. Restoring the original flags reproduced 1,986 stale lines.
+The probe was unloaded afterwards.
+
+With the corrected flags, two HDMI-to-NV12 runs produced 301 strictly
+decodable pictures each at 960×540 and approximately 58–60 fps. A short
+hardware-to-hardware stream with the original flags also decoded successfully.
+However, a later 30-second 1920×1080 RTSP recording failed strict decoding
+after restoring the original flags. Reapplying the correction with the same
+service and bridge binary produced 1,342 strictly decodable pictures in
+29.996 seconds (44.7 fps). That bridge copied compressed access units into
+cached memory before RTSP packetisation; raw frames stayed in DMA-BUFs.
+The coherency correction is therefore still required at the higher setting.
+PCIe validation used the runtime probe; an attempted warm boot into the
+corrected DT failed and the watchdog recovered the original SD system.
+The camera validation above used the final DT at boot.
 
 ## Board evidence: 2026-09-13
 

@@ -134,7 +134,7 @@ in
     firmwarePartitionOffset = 12;
     firmwarePartitionName = "ESP";
     firmwareSize = 256;
-    rootFilesystemCreator = "${pkgs.path}/nixos/lib/make-btrfs-fs.nix";
+    rootFilesystemCreator = pkgs.path + "/nixos/lib/make-btrfs-fs.nix";
     rootVolumeLabel = "rootfs";
 
     populateFirmwareCommands =

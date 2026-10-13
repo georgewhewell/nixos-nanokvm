@@ -1,0 +1,102 @@
+Read received frames from the SDIO TX thread between aggregates.
+
+The SDIO core dispatches the card interrupt from a workqueue. The TX thread
+runs SCHED_FIFO and re-claims the host for every transfer, so while it has
+frames to send the workqueue never gets the host and received frames wait in
+the card. Under a saturated uplink the downlink collapses, and a TCP download
+is held back by its own ACKs.
+
+Split the receive read out of the interrupt handler as aicwf_sdio_rx_read()
+and also call it from the TX thread after each transmitted aggregate: once if
+more frames are queued to send, otherwise until the card has nothing more or
+tx_service_rx reads were made. 0 restores the old behaviour. The read checks
+the card's own status register, so no SDIO core state is consulted.
+
+--- a/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/aicwf_sdio.c
++++ b/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/aicwf_sdio.c
+@@ -64,6 +64,14 @@
+ int tx_aggr_counter = 32;
+ module_param_named(tx_aggr_counter, tx_aggr_counter, int, 0644);
+ 
++/* Most receive reads the TX thread makes once its queue is empty; 0 leaves them all to the SDIO interrupt. */
++int tx_service_rx = 4;
++module_param_named(tx_service_rx, tx_service_rx, int, 0644);
++
++/* Only changes with the SDIO host held. */
++static unsigned int aicwf_sdio_rx_enqueued;
++static void aicwf_sdio_rx_read(struct sdio_func *func);
++
+ #ifdef CONFIG_TX_NETIF_FLOWCTRL
+ int tx_fc_low_water = AICWF_SDIO_TX_LOW_WATER;
+ module_param_named(tx_fc_low_water, tx_fc_low_water, int, 0644);
+@@ -1927,6 +1935,32 @@
+ 
+ }
+ 
++/*
++ * The SDIO core runs the card interrupt from a workqueue, which cannot get
++ * the host while this real-time thread keeps sending. Read received frames
++ * between aggregates so a saturated uplink does not starve the downlink.
++ */
++static void aicwf_sdio_tx_service_rx(struct aic_sdio_dev *sdiodev)
++{
++	struct sdio_func *func = sdiodev->func;
++	int reads = tx_service_rx;
++	unsigned int seen;
++
++	if (reads <= 0)
++		return;
++
++	/* Frames are still waiting to go out: read once and get back to them. */
++	if (!aicwf_is_framequeue_empty(&sdiodev->tx_priv->txq))
++		reads = 1;
++
++	sdio_claim_host(func);
++	do {
++		seen = aicwf_sdio_rx_enqueued;
++		aicwf_sdio_rx_read(func);
++	} while (aicwf_sdio_rx_enqueued != seen && --reads > 0);
++	sdio_release_host(func);
++}
++
+ static void aicwf_sdio_tx_process(struct aic_sdio_dev *sdiodev)
+ {
+ 	int err = 0;
+@@ -1997,6 +2031,9 @@
+                 		break;
+             		} else {
+                 		aicwf_sdio_send(sdiodev->tx_priv, 0);
++				/* An aggregate just went out. */
++				if (atomic_read(&sdiodev->tx_priv->aggr_count) == 0)
++					aicwf_sdio_tx_service_rx(sdiodev);
+             		}
+         	}
+ 	}
+@@ -2845,12 +2882,14 @@
+ 	spin_unlock_irqrestore(&rx_priv->rxqlock, flags);
+ 
+ 	atomic_inc(&rx_priv->rx_cnt);
++	aicwf_sdio_rx_enqueued++;
+ }
+ 
+ 
+ #define SDIO_OTHER_INTERRUPT (0x1ul << 7)
+ 
+-void aicwf_sdio_hal_irqhandler(struct sdio_func *func)
++/* Read one aggregate of received frames if the card has any. Callers hold the SDIO host. */
++static void aicwf_sdio_rx_read(struct sdio_func *func)
+ {
+ 	struct aicwf_bus *bus_if = dev_get_drvdata(&func->dev);
+ 	struct aic_sdio_dev *sdiodev = bus_if->bus_priv.sdio;
+@@ -2989,6 +3028,11 @@
+     rwnx_wakeup_unlock(sdiodev->rwnx_hw->ws_irqrx);
+ }
+ 
++void aicwf_sdio_hal_irqhandler(struct sdio_func *func)
++{
++	aicwf_sdio_rx_read(func);
++}
++
+ #if defined(CONFIG_SDIO_PWRCTRL)
+ void aicwf_sdio_pwrctl_timer(struct aic_sdio_dev *sdiodev, uint duration)
+ {

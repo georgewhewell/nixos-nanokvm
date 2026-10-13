@@ -17,8 +17,9 @@ The raw image is under `result/sd-image/`. The initial login is `root` with
 password `nixos-nanokvm`; change this shared development password immediately.
 See [the SD guide](docs/sg2002-c906l-picoclaw-sd-image.md) for SSH keys, Wi-Fi
 provisioning and writing the card. Mainline wired SD targets also remain
-available as `boards.licheerv.mainline.sd` and `boards.pcie.mainline.sd`;
-their initial password is `nixos`.
+available as `boards.licheerv.mainline.sd`, `boards.pcie.mainline.sd` and
+`boards.cube.mainline.sd` (NanoKVM Lite/Full with the beta carrier); their
+initial password is `nixos`.
 
 ## USB boot
 
@@ -64,6 +65,10 @@ recording still starts only when a profiling tool requests it. Synthetic thermal
 injection remains opt-in through `sg2002-kernel-mainline.override {
 thermalEmulation = true; }`; the former `profiling` argument has been removed.
 Existing running kernels retain their compiled configuration until the next boot.
+
+Mainline images expose the SG2002 hardware RNG through `/dev/hwrng`.
+The driver credits 900 bits of entropy per 1024 output bits when feeding
+Linux's random pool. This is the configured credit, not a measured entropy estimate.
 
 ```sh
 nix develop .#c906l

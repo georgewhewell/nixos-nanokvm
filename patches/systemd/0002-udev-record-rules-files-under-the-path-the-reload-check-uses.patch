@@ -1,0 +1,32 @@
+From: bloqaudio <qoshea@gmail.com>
+Subject: [PATCH] udev: record rules files under the path the reload check uses
+
+udev_rules_parse_file() stores each file's stat under
+ConfFile.original_path, e.g. /etc/udev/rules.d/60-block.rules.
+udev_rules_should_reload() compares that map with one built by
+config_get_stats_by_path(), whose keys come from conf_files_list_strv()
+and are ConfFile.result: the file name joined to the resolved directory.
+
+The two agree only while no rules directory is a symlink. On NixOS
+/etc/udev/rules.d is one, so no key ever matches, udev logs "Udev rules
+need reloading" at every check, re-parses every rules file and kills its
+workers. That happens each time events arrive more than three seconds
+after the previous check.
+
+Store the stat under ConfFile.result.
+---
+ src/udev/udev-rules.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+--- a/src/udev/udev-rules.c
++++ b/src/udev/udev-rules.c
+@@ -1697,7 +1697,8 @@
+                 return log_warning_errno(errno, "Failed to open %s, ignoring: %m", c->original_path);
+         }
+ 
+-        r = hashmap_put_stats_by_path(&rules->stats_by_path, c->original_path, &c->st);
++        /* The key must match what config_get_stats_by_path() uses in udev_rules_should_reload(). */
++        r = hashmap_put_stats_by_path(&rules->stats_by_path, c->result, &c->st);
+         if (r < 0)
+                 return log_warning_errno(r, "Failed to save stat for %s, ignoring: %m", c->original_path);
+ 

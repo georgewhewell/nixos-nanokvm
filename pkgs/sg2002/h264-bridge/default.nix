@@ -1,7 +1,7 @@
 { stdenv, lib, alsa-lib ? null, enablePcma ? false }:
 stdenv.mkDerivation {
   pname = "sg2002-h264-bridge${lib.optionalString enablePcma "-pcma"}";
-  version = "0.2";
+  version = "0.3";
 
   src = ./sg2002-h264-bridge.c;
   dontUnpack = true;
@@ -22,22 +22,4 @@ stdenv.mkDerivation {
     install -Dm755 sg2002-h264-bridge "$out/bin/sg2002-h264-bridge${lib.optionalString enablePcma "-pcma"}"
     runHook postInstall
   '';
-
-  passthru.benchmark = stdenv.mkDerivation {
-    pname = "sg2002-conversion-benchmark";
-    version = "1";
-    src = ./.;
-    dontConfigure = true;
-    buildPhase = ''
-      runHook preBuild
-      $CC -std=c11 -O2 -Wall -Wextra -Wconversion -Wshadow -Wformat=2 \
-        -Werror bench-convert.c -o bench-convert
-      runHook postBuild
-    '';
-    installPhase = ''
-      runHook preInstall
-      install -Dm755 bench-convert "$out/bin/bench-convert"
-      runHook postInstall
-    '';
-  };
 }

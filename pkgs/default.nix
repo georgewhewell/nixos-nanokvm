@@ -560,16 +560,6 @@ in
   sg2002-kernel-mainline-bluetooth = cross.callPackage ./sg2002/linux-mainline {
     bluetooth = true;
   };
-  # The common carrier's onboard RXADC/TXDAC ALSA simple-card path is also
-  # opt-in.  Keep separate variants so a Bluetooth-only consumer does not pay
-  # for sound, while an audio+Bluetooth consumer gets one ABI-consistent tree.
-  sg2002-kernel-mainline-audio = cross.callPackage ./sg2002/linux-mainline {
-    audio = true;
-  };
-  sg2002-kernel-mainline-audio-bluetooth = cross.callPackage ./sg2002/linux-mainline {
-    audio = true;
-    bluetooth = true;
-  };
 
   # Vendor 5.10 tree with NanoKVM extras (NBD, erofs). Built from
   # licheerv-nano-build's vendor kernel tarball; baseExtraConfig is
@@ -623,10 +613,11 @@ in
   sg2002-dtb-mainline-oled = dtbMainline.oled;
   sg2002-dtb-mainline-picoclaw-lcd = dtbMainline.picoclaw-lcd;
   sg2002-dtb-mainline-picoclaw-lcd-wifi = dtbMainline.picoclaw-lcd-wifi;
-  sg2002-dtb-mainline-picoclaw-lcd-high-speed = dtbMainline.picoclaw-lcd-high-speed;
   sg2002-dtb-mainline-picoclaw-c906l-lcd-for = contract:
     dtbMainline.picoclaw-c906l-lcd-for contract;
   sg2002-dtb-mainline-pcie = dtbMainline.pcie;
+  sg2002-dtb-mainline-cube = dtbMainline.cube;
+  sg2002-dtb-mainline-cube-full-speed = dtbMainline.cube-full-speed;
   sg2002-dtb-mainline-pcie-nowifi = dtbMainline.pcie-nowifi;
   sg2002-dtb-mainline-pcie-nowifi-c906l-for = contract:
     dtbMainline.pcie-nowifi-c906l-for contract;

@@ -39,12 +39,8 @@
 	/* High-speed. Measured on a LicheeRV Nano W on 2026-09-19: full-speed tops out at
 	 * ~7.7 Mbit/s each way; high-speed carries ~220 Mbit/s into the
 	 * board and ~190 Mbit/s out with CDC-ECM. The old full-speed cap
-	 * dated from PicoClaw-carrier link errors (-71 EPROTO). Those did
-	 * not recur when the PicoClaw was retested at high-speed with this
-	 * layout on 2026-09-19, but that carrier's bulk-IN path stopped
-	 * once, silently, 12 minutes into a board-to-host soak, so the
-	 * PicoClaw compositions keep full-speed via
-	 * sg2002-usb-full-speed.dtsi. The Nano W has not been soaked for
+	 * dated from PicoClaw-carrier link errors (-71 EPROTO), which did
+	 * not recur with this layout. The Nano W has not been soaked for
 	 * longer than about ten minutes per boot at high-speed. */
 	maximum-speed = "high-speed";
 
@@ -80,10 +76,9 @@
 		};
 	};
 
-	/* I2C0 on the dedicated IIC0 pair — pull-ups are required by
-	 * the I2C protocol and the on-die pad pulls (~50 kΩ) are weak;
-	 * external 4.7-10 kΩ resistors on the user's wiring are still
-	 * the right answer if they're driving long traces. */
+	/* Existing I2C0 configuration on pads named IIC0_SCL/SDA.
+	 * The on-die pad pulls are weak, so external 4.7-10 kΩ resistors
+	 * are recommended when driving long traces. */
 	i2c0_cfg: i2c0-cfg {
 		i2c0-pins {
 			pinmux = <PINMUX(PIN_IIC0_SCL, 0)>,
@@ -252,6 +247,38 @@
 		status = "okay";
 	};
 
+	rng: rng@2070000 {
+		compatible = "sophgo,sg2002-trng";
+		reg = <0x02070000 0x1000>;
+		clocks = <&clk CLK_EFUSE>, <&clk CLK_APB_EFUSE>;
+		clock-names = "core", "apb";
+	};
+
+	/* Read-only public eFuse shadow words. The UID cell is the word
+	 * pair Sipeed's firmware derives the NanoKVM MAC and hostname
+	 * from (vendor /sys/class/cvi-base/base_uid). The driver turns
+	 * the mac-address cell over the same words into that MAC. */
+	efuse: efuse@3050000 {
+		compatible = "sophgo,sg2002-efuse";
+		reg = <0x03050000 0x1000>;
+		clocks = <&clk CLK_EFUSE>, <&clk CLK_APB_EFUSE>;
+		clock-names = "efuse", "apb";
+
+		nvmem-layout {
+			compatible = "fixed-layout";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			uid@c {
+				reg = <0x0c 0x8>;
+			};
+
+			efuse_mac: mac-address@c {
+				reg = <0x0c 0x8>;
+			};
+		};
+	};
+
 	/* On-die "tempsen" sensor. Driver in our 0006 kernel patch
 	 * (backport of Haylen Chu's v5 LKML series); compatible
 	 * sophgo,cv1800-thermal. The driver requires the IRQ for
@@ -269,39 +296,44 @@
 	};
 };
 
-/* Auxiliary SAR-ADC at 0x030F0000. Upstream cv180x.dtsi already
- * declares it disabled with three channels @0..2 — only PIN_ADC1
- * is broken out as a dedicated analog pad on the SG2002 pin set
- * (channels 0 and 2 land on internal nets), but enabling all
- * three is harmless and lets the channels appear under
- * /sys/bus/iio/devices/iio:device0. The iio-hwmon shim below
- * also re-exposes them as in1_input..in3_input under
- * /sys/class/hwmon/hwmonN/ so `sensors` and friends pick them up. */
+/* The GMAC has no fused address; boards that enable it use the one
+ * Sipeed's firmware assigns, instead of a random one each boot. */
+&gmac0 {
+	nvmem-cells = <&efuse_mac>;
+	nvmem-cell-names = "mac-address";
+};
+
+/* Auxiliary SAR-ADC at 0x030F0000. The upstream driver exposes
+ * zero-based IIO channels 0..2 for hardware channels 1..3; ADC1
+ * therefore corresponds to IIO channel 0 (result register 0x14).
+ * Only ADC1 is bonded out in the SG2002 active domain. The other
+ * readings are not documented board voltage monitors. Pin routing,
+ * reference selection and calibration still need board validation;
+ * enabling the controller alone does not establish valid voltages. */
 &saradc {
-	/* `#io-channel-cells` is missing from the upstream saradc node
-	 * — add it here so iio-hwmon (and any other iio-consumer) can
-	 * reference channels via `io-channels = <&saradc N>`. The
-	 * sophgo,cv1800b-saradc binding YAML doesn't list it, so this
-	 * is also worth upstreaming once we get around to it. */
+	/* The standalone DTB builder uses unpatched kernel sources. Keep
+	 * this alongside the SoC-node fix until that source includes it. */
 	#io-channel-cells = <1>;
 	status = "okay";
 };
 
 / {
-	/* Generic IIO→hwmon bridge. Names the three SAR-ADC channels
-	 * as voltage inputs; the shim handles raw→millivolt conversion
-	 * using the IIO scale (~0.806 mV/LSB for 12-bit / 3.3 V). */
+	/* Generic IIO→hwmon bridge. The upstream driver hard-codes a
+	 * 3300/4096 mV scale without reading reference selection/trim.
+	 * These nominal values are not calibrated board measurements. */
 	saradc_hwmon: iio-hwmon {
 		compatible = "iio-hwmon";
 		io-channels = <&saradc 0>, <&saradc 1>, <&saradc 2>;
 	};
 };
 
-/* I2C0 on the dedicated IIC0 pair (the only I2C with bonded-out
- * pads on the SG2002). After enable, /dev/i2c-0 is available for
- * userspace tools (i2cdetect / i2cget / i2cset). The four other
- * I2C controllers in the IP exist in silicon but the SG2002 pad
- * mux doesn't expose them, so they stay disabled. */
+/* IIC1..4 have external alternate-function routes, selected by
+ * carrier-specific overlays:
+ * the OLED uses IIC1 on SD1_D3/D0 and the camera uses IIC4 on
+ * PWR_WAKEUP0/PWR_BUTTON1. Their pins can conflict with SDIO,
+ * camera, display or other clients, so leave routing to each board.
+ * The existing I2C0 configuration uses IIC0_SCL/SDA function 0; vendor
+ * sources disagree on its signal name, so its routing needs validation. */
 &i2c0 {
 	pinctrl-0 = <&i2c0_cfg>;
 	pinctrl-names = "default";
@@ -411,9 +443,10 @@
 	/* Thermal zone bound to the on-die tempsen above. Driver
 	 * requires devm_thermal_of_zone_register() to find a zone
 	 * referencing the sensor; without this it returns -ENODEV.
-	 * Critical at 125 °C — vendor cv181x DT uses 130 °C, but the
-	 * silicon datasheet absolute-max is 125 °C and we'd rather
-	 * orderly_poweroff before the SoC actually goes pop. The
+	 * SG2002 Preliminary Datasheet v1.0-alpha, section 2.5.2 note 3
+	 * (p. 27) and section 2.5.5 (p. 32), limits packaged DRAM to
+	 * 115 °C. Request reboot at 105 °C to leave nominal margin;
+	 * this firmware has no working power-off handler. The
 	 * 1 s polling delay is borrowed from vendor; the cv1800
 	 * driver also fires the zone via threshold IRQ when trips
 	 * are crossed, so polling is just a fallback. */
@@ -422,10 +455,11 @@
 			polling-delay = <1000>;
 			polling-delay-passive = <1000>;
 			thermal-sensors = <&soc_temp>;
+			critical-action = "reboot";
 
 			trips {
 				soc_crit: soc-crit {
-					temperature = <125000>; /* mC */
+					temperature = <105000>; /* mC */
 					hysteresis = <2000>;
 					type = "critical";
 				};

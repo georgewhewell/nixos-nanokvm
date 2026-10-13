@@ -1,0 +1,21 @@
+Let TCP queue 0.25 ms of data below the socket instead of 8 ms.
+
+The driver sets sk_pacing_shift to 7, which lets each TCP socket keep about
+8 ms of data queued in the device. Frames are freed as soon as they are
+copied into an SDIO aggregate, so that budget sits on top of what the
+firmware already holds, and a saturated upload delays everything else on
+the link. 12 allows about 0.25 ms. On a PicoClaw that is the knee: a
+best-effort ping under a full upload takes 22 ms at 7, 15 ms at 10 and
+11.6 ms at 12, with the upload rate unchanged, and 14 gains nothing more.
+
+--- a/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/rwnx_main.c
++++ b/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/rwnx_main.c
+@@ -5870,7 +5870,7 @@
+ 	rwnx_hw->cmd_mgr = &rwnx_plat->usbdev->cmd_mgr;
+ #endif
+ 	rwnx_hw->mod_params = &rwnx_mod_params;
+-	rwnx_hw->tcp_pacing_shift = 7;
++	rwnx_hw->tcp_pacing_shift = 12;
+ 
+ #ifdef CONFIG_SCHED_SCAN
+     rwnx_hw->is_sched_scan = false;

@@ -173,6 +173,8 @@ with lib.kernel; {
   EROFS_FS_ZIP = yes;
   EROFS_FS_ZIP_ZSTD = yes;
   BLK_DEV_LOOP = yes;
+  # Create loop devices on demand; eight idle ones cost udev time each boot.
+  BLK_DEV_LOOP_MIN_COUNT = freeform "0";
   OVERLAY_FS = yes;
 
   # The SD image has a small FAT firmware partition. Stage-1 mounts it
@@ -216,6 +218,9 @@ with lib.kernel; {
   SOPHGO_CV1800_RTCSYS = yes;
   RTC_DRV_CV1800 = yes;
 
+  HW_RANDOM = yes;
+  HW_RANDOM_SG2002 = yes;
+
   # On-die SoC temperature sensor (driver in patches/0006, backport
   # of Haylen Chu's stalled v5 LKML series). Built-in rather than =m
   # so it shows up in the USB-recovery initrd without an extra entry
@@ -224,6 +229,11 @@ with lib.kernel; {
   THERMAL = yes;
   THERMAL_OF = yes;
 
+  # UID and public eFuse shadow words only; the provider has no
+  # programming path.
+  NVMEM = yes;
+  NVMEM_SG2002_EFUSE = yes;
+
   # SAR-ADC (auxiliary 12-bit ADC at 0x030F0000, distinct from the
   # audio RXADC). Three channels; PIN_ADC1 is the only one broken
   # out as a dedicated analog pad on the SG2002. Driver: drivers/iio/
@@ -231,15 +241,16 @@ with lib.kernel; {
   # /sys/bus/iio/devices/iio:device0/in_voltage{0,1,2}_raw,
   # plus — via the iio-hwmon shim and the matching DT node in
   # sg2002-licheerv-nano-bw.dtsi — under /sys/class/hwmon/hwmonN/
-  # as in1_input..in3_input millivolts (so `sensors` etc. work).
+  # as in1_input..in3_input. The hard-coded 3.3 V reference is not
+  # calibrated; these are not established board voltage measurements.
   IIO = yes;
   SOPHGO_CV1800B_ADC = yes;
   SENSORS_IIO_HWMON = yes;
 
-  # I2C bus 0 — the only I2C with a dedicated pin pair on the SG2002
-  # pad set (PIN_IIC0_SCL/SDA). Built-in + the chardev so userspace
-  # gets /dev/i2c-0 for i2cdetect / i2cget directly. dwc-i2c is the
-  # snps,designware-i2c driver.
+  # DesignWare I2C controllers: IIC1..4 have alternate-function routes.
+  # The existing IIC0 pad routing needs validation. Overlays select pins
+  # and clients (including the IIC1 OLED and IIC4 camera). Built-in
+  # with the chardev for userspace access to each enabled bus.
   I2C = yes;
   I2C_CHARDEV = yes;
   I2C_DESIGNWARE_PLATFORM = yes;
@@ -257,6 +268,8 @@ with lib.kernel; {
   SPI = yes;
   SPI_DESIGNWARE = module;
   SPI_DW_MMIO = module;
+  # Inert until a board gives its SPI controller a `dmas` property.
+  SPI_DW_DMA = yes;
   SPI_SPIDEV = module;
 
   # PWM controller (driver in patches/0008). Built-in so /sys/class/
@@ -265,12 +278,18 @@ with lib.kernel; {
   PWM = yes;
   PWM_SOPHGO_CV1800 = yes;
 
-  # Audio OFF on the KVM: the SoC has I2S/TDM + internal mic/speaker,
-  # but turning SND_SOC on against the full NixOS base drags ~400 codec
-  # modules we'll never use, and a KVM doesn't need audio. Force the
-  # whole sound subsystem off. (Re-enable SOUND/SND_SOC + the
-  # SND_SOC_CV1800B_* drivers here if audio is ever wanted.)
-  SOUND = no;
+  # The common Nano carrier DT describes the internal RXADC on I2S0 and
+  # TXDAC on I2S3 as the sg2002-onboard simple card. Build in only that
+  # lab-proven minimum: a diskless initrd must not depend on broad ALSA
+  # codec module discovery.
+  SOUND = yes;
+  SND = yes;
+  SND_PCM = yes;
+  SND_SOC = yes;
+  SND_SIMPLE_CARD = yes;
+  SND_SOC_CV1800B_TDM = yes;
+  SND_SOC_CV1800B_ADC_CODEC = yes;
+  SND_SOC_CV1800B_DAC_CODEC = yes;
   # DMA engine + dmamux required for the I2S DMA paths to work.
   # dw_axi_dmac drives the 8-channel AXI DMA at 4330000; the dmamux
   # (drivers/dma/cv1800b-dmamux.c) routes the peripheral request

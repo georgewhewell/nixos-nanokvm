@@ -36,7 +36,7 @@
   diskDevice = config.disko.devices.disk.sg2002-sd.device;
   firmwarePart = partitionDevice diskDevice 1;
   rootPart = partitionDevice diskDevice 2;
-  upstreamExtlinuxBuilder = import "${pkgs.path}/nixos/modules/system/boot/loader/generic-extlinux-compatible/extlinux-conf-builder.nix" {
+  upstreamExtlinuxBuilder = import (pkgs.path + "/nixos/modules/system/boot/loader/generic-extlinux-compatible/extlinux-conf-builder.nix") {
     inherit lib pkgs;
   };
   # The generic builder's plain `cp` may use Btrfs copy_file_range and retain
@@ -134,7 +134,12 @@
     # ExecCondition succeeds only while more than 1 MiB remains after p2.
     # Once the image has consumed the card, skip cloud-utils growpart before
     # it takes an exclusive whole-device lock and waits for udev on every boot.
-    test "$((part_start + part_sectors + 2048))" -lt "$disk_sectors"
+    # Skip with 2, not 1: nixpkgs lists 1 in the unit's SuccessExitStatus,
+    # and systemd applies that list to ExecCondition as well.
+    if [ "$((part_start + part_sectors + 2048))" -lt "$disk_sectors" ]; then
+      exit 0
+    fi
+    exit 2
   '';
   sdImage = pkgs.runCommand "${imageName}-${config.system.nixos.label}" {} ''
     mkdir -p "$out/sd-image" "$out/nix-support"
@@ -174,6 +179,9 @@ in {
         "rootwait"
         "rw"
         "rootfstype=btrfs"
+        # NBD is built in for the USB live boots; an SD boot has no use for
+        # its sixteen preallocated devices.
+        "nbd.nbds_max=0"
         (if config.sg2002.consoleDevice == "tty0" then
           "console=tty0"
         else

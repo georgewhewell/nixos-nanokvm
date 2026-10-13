@@ -1,0 +1,34 @@
+From: bloqaudio <qoshea@gmail.com>
+Subject: [PATCH] dmaengine: dw-axi-dmac: report the burst length it programs
+
+dw_axi_dma_set_hw_desc() programs SRC_MSIZE and DST_MSIZE as 4 for every
+peripheral transfer and ignores the slave config's maxburst. The driver
+nevertheless reports max_burst as the optional AXI burst length limit,
+which is 0 when "snps,axi-max-burst-len" is absent.
+
+Clients that size their request thresholds from max_burst then disagree
+with the controller. spi-dw falls back to 16, picks half its 16-entry
+FIFO and asks for a receive request at 8 entries. The controller takes 4
+per request, so the last 4 bytes of a transfer never raise a request and
+every DMA receive ends in "DMA transaction timed out".
+
+Report 4, the burst the controller actually uses.
+---
+ drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+--- a/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c
++++ b/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c
+@@ -1564,7 +1564,11 @@
+ 	dma_cap_set(DMA_CYCLIC, dw->dma.cap_mask);
+ 
+ 	/* DMA capabilities */
+-	dw->dma.max_burst = hdata->axi_rw_burst_len;
++	/*
++	 * Peripheral transfers are always programmed with an MSIZE of 4; the
++	 * AXI burst length limits something else and is often left unset.
++	 */
++	dw->dma.max_burst = 4;
+ 	dw->dma.src_addr_widths = AXI_DMA_BUSWIDTHS;
+ 	dw->dma.dst_addr_widths = AXI_DMA_BUSWIDTHS;
+ 	dw->dma.directions = BIT(DMA_MEM_TO_MEM);

@@ -63,10 +63,10 @@
 	 * 256 MiB board (observed -ENOMEM at STREAMON without this).
 	 * dma_alloc_from_coherent() rounds each 5.5 MiB frame buffer to an
 	 * order-11 (8 MiB) 8 MiB-aligned region, so budget 8 MiB per queued
-	 * buffer plus the scratch. The 32 MiB pool covers Coda980's small 640x360
-	 * arena plus a double-buffered CSI queue and scratch. The capture driver
-	 * permits that explicit two-buffer queue; larger queues do not fit once
-	 * Coda is active.
+	 * buffer plus the scratch. A 40 MiB pool fits the double-buffered CSI
+	 * queue and scratch alongside Coda980's 1280x720 arena. With 32 MiB,
+	 * 720p encoding fails at capture STREAMON; 640x360 fits. Keep the CSI
+	 * queue at two buffers to leave room for the encoder.
 	 * Its base matches the NanoKVM-PCIe media-pool placement. */
 	reserved-memory {
 		#address-cells = <1>;
@@ -76,7 +76,7 @@
 		video_pool: video-pool@86800000 {
 			compatible = "shared-dma-pool";
 			no-map;
-			reg = <0x86800000 0x2000000>;
+			reg = <0x86800000 0x2800000>;
 		};
 	};
 
@@ -106,7 +106,10 @@
 		compatible = "sophgo,sg2002-ddr-top", "syscon";
 		reg = <0x0800a000 0x1000>;
 	};
+};
 
+/* All three DMA engines inherit /soc's dma-noncoherent property. */
+&{/soc} {
 	/* The generic SoC node is disabled, and the standalone DTB builder
 	 * consumes an unpatched kernel source. Keep the complete enabled node
 	 * here, sharing the deterministic media pool with CSI capture. */
@@ -205,13 +208,6 @@
 	};
 };
 
-&clk {
-	/* The beta-board middleware receiver profile selects CAM_MCLK1 while
-	 * retaining the GC4653 mode's 24 MHz reference-clock frequency. */
-	assigned-clocks = <&clk CLK_CAM1>;
-	assigned-clock-rates = <24000000>;
-};
-
 &i2c4 {
 	pinctrl-0 = <&i2c4_cam_cfg>;
 	pinctrl-names = "default";
@@ -224,6 +220,10 @@
 		pinctrl-names = "default";
 		clocks = <&clk CLK_CAM1>;
 		clock-names = "xvclk";
+		/* Keep the sensor's clock assignment on its consumer: the shared
+		 * CPUFreq overlay assigns MPLL on the clock-controller node. */
+		assigned-clocks = <&clk CLK_CAM1>;
+		assigned-clock-rates = <24000000>;
 		reset-gpios = <&porte 1 GPIO_ACTIVE_LOW>;
 
 		port {

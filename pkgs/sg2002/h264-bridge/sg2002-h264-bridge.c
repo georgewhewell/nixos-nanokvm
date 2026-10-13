@@ -1,34 +1,10 @@
 /*
- * SG2002 V4L2 H.264 bridge:
+ * SG2002 hardware H.264 bridge:
  *
- *   /dev/video0 (UYVY capture) -> CPU UYVY->NV12/NV21 -> /dev/video1 (Coda)
- *   /dev/video0 (SRGGB12P capture) -> CPU box demosaic/downsample -> NV12
- *                                      -> /dev/video1 (Coda)
- * or, with --scaler vpss:
- *   /dev/video0 -> /dev/video2 (VPSS scaler/CSC mem2mem) -> /dev/video1,
- *   a zero-copy dmabuf chain (capture expbuf -> scaler OUTPUT import;
- *   scaler CAPTURE and encoder OUTPUT share the same CMA-heap buffers).
- *   sinks: Annex-B file/stdout and/or RTSP publisher (mediamtx-style).
- *
- * Performance shape:
- *  - With --io dmabuf (default) raw frames live in CACHED system dma-heap
- *    buffers imported by the encoder; CPU writes stay in cache and a single
- *    DMA_BUF_IOCTL_SYNC(END|RW) before QBUF is the only coherency cost.
- *    NV12 + a direct-DMA-capable kernel is then fully zero-copy; NV21 falls
- *    back to the driver's coherent staging, reading a cached vmap instead of
- *    an uncached vb2 mapping.  --io mmap reproduces the classic vb2 path.
- *  - The UYVY->NVxx conversion is single pass, 8 source bytes / 2 stores
- *    per 4 pixels (SWAR); there is no separate NV12->NV21 swap pass.
- *  - Encoder OUTPUT queue is deep enough that hardware encode overlaps the
- *    next conversion on the single core.
- *
- * Offline mode is useful on a host and is intentionally independent of V4L2:
- *   sg2002-h264-bridge --raw nv12 width height input.uyvy output.raw
- *
- * Live mode is:
- *   sg2002-h264-bridge [capture-node] [encoder-node] [options]
- * Legacy positional form still accepted:
- *   sg2002-h264-bridge [capture-node] [encoder-node] [h264-output|-] [full|half]
+ * HDMI UYVY or ISP NV21 -> VPSS scaler/CSC -> NV12 -> Coda encoder.
+ * Capture buffers are exported to VPSS; VPSS and Coda share DMA-BUFs.
+ * The CPU moves buffer descriptors, without converting raw pixels.
+ * Sinks: Annex-B file/stdout and/or RTSP publisher (MediaMTX).
  *
  * SPDX-License-Identifier: GPL-2.0-only
  */
@@ -59,19 +35,14 @@
 #include <unistd.h>
 
 #define CAPTURE_BUFFERS 2
-#define ENCODER_OUT_BUFFERS 4
 #define ENCODER_CAP_BUFFERS 3
 #define SCALER_MID_BUFFERS 4
-#define DEFAULT_CAPTURE "/dev/video0"
-#define DEFAULT_ENCODER "/dev/video1"
-#define DEFAULT_SCALER "/dev/video2"
-#define DMA_HEAP_SYSTEM "/dev/dma_heap/system"
-/* vb2-dma-contig imports must be single-segment; the system heap can
- * hand a multi-segment 3 MiB buffer, so prefer the guaranteed-contiguous
- * CMA heaps (named default_cma_region in newer kernels, linux,cma in
- * older ones) and fall back to system. */
+/* Probe order can swap Coda and VPSS video numbers between boots. */
+#define DEFAULT_CAPTURE "/dev/v4l/by-path/platform-a0c2000.video-capture-video-index0"
+#define DEFAULT_ENCODER "/dev/v4l/by-path/platform-b030000.video-codec-video-index0"
+#define DEFAULT_SCALER "/dev/v4l/by-path/platform-a080000.vpss-video-index0"
+/* VPSS and Coda require contiguous, single-segment DMA-BUFs. */
 #define DMA_HEAP_CMA "/dev/dma_heap/default_cma_region"
-#define DMA_HEAP_CMA_OLD "/dev/dma_heap/linux,cma"
 /* The no-map media pool exported as a heap: contiguous by definition and
  * independent of the colonized default CMA. */
 #define DMA_HEAP_RESERVED "/dev/dma_heap/reserved"
@@ -136,6 +107,20 @@ static uint64_t now_ns(void)
 	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
+static int frame_due(uint64_t now, uint64_t interval, uint64_t *next)
+{
+	if (!interval)
+		return 1;
+	if (!*next)
+		*next = now;
+	if (now < *next)
+		return 0;
+	/* Keep the cadence despite wakeup jitter; discard missed slots after
+	 * a stall instead of admitting a burst of catch-up frames. */
+	*next += ((now - *next) / interval + 1) * interval;
+	return 1;
+}
+
 static int write_all(int fd, const void *data, size_t length)
 {
 	const uint8_t *cursor = data;
@@ -169,560 +154,6 @@ static int parse_u32(const char *text, unsigned int *value)
 		return -1;
 	*value = (unsigned int)parsed;
 	return 0;
-}
-
-/* ------------------------------------------------------------------ */
-/* UYVY -> NV12/NV21 conversion, single pass, SWAR                     */
-/* ------------------------------------------------------------------ */
-
-/* Convert packed UYVY to a tightly packed, progressive NV12/NV21 frame.
- *
- * src_stride is bytes per source line and dst_stride is bytes per destination
- * luma/chroma line.  Coda commonly rounds 1080 to 1088 macroblock lines; the
- * final dst_height-src_height lines repeat the final source line, so no
- * uninitialised DMA bytes can reach the encoder.  Columns past src_width are
- * edge-extended.  src_width must be a multiple of 4 (the SWAR group).
- */
-static int uyvy_to_nvxx(const uint8_t *src, unsigned int src_width,
-			unsigned int src_height, unsigned int src_stride,
-			uint8_t *dst, unsigned int dst_width,
-			unsigned int dst_height, unsigned int dst_stride,
-			int nv21)
-{
-	uint8_t *y_plane = dst;
-	uint8_t *uv_plane = dst + (size_t)dst_stride * dst_height;
-	unsigned int y, x;
-
-	if (!src || !dst || (src_width & 3) || (dst_width & 3) ||
-	    (src_height & 1) || (dst_height & 1) || src_width > dst_width ||
-	    src_height > dst_height || src_stride < src_width * 2 ||
-	    dst_stride < dst_width)
-		return -1;
-
-	for (y = 0; y < dst_height; y++) {
-		unsigned int sy = y < src_height ? y : src_height - 1;
-		const uint8_t *line = src + (size_t)sy * src_stride;
-		uint8_t *out = y_plane + (size_t)y * dst_stride;
-
-		for (x = 0; x < src_width; x += 4) {
-			uint64_t w;
-
-			memcpy(&w, line + (size_t)x * 2, 8);
-			{
-				uint64_t yy = (w >> 8) & 0x00FF00FF00FF00FFULL;
-				uint32_t luma32;
-
-				yy = (yy | (yy >> 8)) & 0x0000FFFF0000FFFFULL;
-				yy |= yy >> 16;
-				luma32 = (uint32_t)yy;
-				memcpy(out + x, &luma32, 4);
-			}
-		}
-		for (; x < dst_width; x++)
-			out[x] = out[src_width - 1];
-	}
-
-	for (y = 0; y < dst_height; y += 2) {
-		unsigned int sy0 = y < src_height ? y : src_height - 1;
-		unsigned int sy1 = y + 1 < src_height ? y + 1 : src_height - 1;
-		const uint8_t *line0 = src + (size_t)sy0 * src_stride;
-		const uint8_t *line1 = src + (size_t)sy1 * src_stride;
-		uint8_t *out = uv_plane + (size_t)(y / 2) * dst_stride;
-
-		for (x = 0; x < src_width; x += 4) {
-			uint64_t w0, w1, u01, v01;
-			uint32_t chroma32;
-
-			memcpy(&w0, line0 + (size_t)x * 2, 8);
-			memcpy(&w1, line1 + (size_t)x * 2, 8);
-			/* Vertical average of the two 4:2:2 chroma rows,
-			 * then interleave.  a/b gather U and V lanes with
-			 * headroom for the sum. */
-			{
-				uint64_t u0 = w0 & 0x00FF00FF00FF00FFULL;
-				uint64_t u1 = w1 & 0x00FF00FF00FF00FFULL;
-				uint64_t s = u0 + u1; /* 9-bit lanes at 0,16,32,48 */
-				uint64_t avg = ((s + 0x0001000100010001ULL) >> 1) &
-					       0x00FF00FF00FF00FFULL;
-
-				u01 = (avg & 0xFFULL) | ((avg >> 24) & 0xFF00ULL);
-				v01 = ((avg >> 16) & 0xFFULL) |
-				      ((avg >> 40) & 0xFF00ULL);
-			}
-			if (nv21)
-				chroma32 = (uint32_t)((v01 & 0xFFULL) |
-						      ((u01 & 0xFFULL) << 8) |
-						      ((v01 & 0xFF00ULL) << 8) |
-						      ((u01 & 0xFF00ULL) << 16));
-			else
-				chroma32 = (uint32_t)((u01 & 0xFFULL) |
-						      ((v01 & 0xFFULL) << 8) |
-						      ((u01 & 0xFF00ULL) << 8) |
-						      ((v01 & 0xFF00ULL) << 16));
-			memcpy(out + x, &chroma32, 4);
-		}
-		for (; x < dst_width; x += 2) {
-			out[x] = out[src_width - 2];
-			out[x + 1] = out[src_width - 1];
-		}
-	}
-
-	return 0;
-}
-
-/* Box-filter a 2x2 luma area and a 4x4 source chroma area into one half-scale
- * progressive NV12/NV21 frame.  SG2002 capture is fixed at 1080p, so this mode
- * is useful when bandwidth or encoder load argues for 960x540. */
-static int uyvy_to_nvxx_half(const uint8_t *src, unsigned int src_width,
-			     unsigned int src_height, unsigned int src_stride,
-			     uint8_t *dst, unsigned int dst_width,
-			     unsigned int visible_height,
-			     unsigned int dst_height, unsigned int dst_stride,
-			     int nv21)
-{
-	uint8_t *y_plane = dst;
-	uint8_t *uv_plane = dst + (size_t)dst_stride * dst_height;
-	unsigned int y, x;
-
-	if (!src || !dst || src_width != dst_width * 2 ||
-	    src_height != visible_height * 2 || (dst_width & 3) ||
-	    (visible_height & 1) || dst_height < visible_height ||
-	    (dst_height & 1) || src_stride < src_width * 2 ||
-	    dst_stride < dst_width)
-		return -1;
-
-	for (y = 0; y < visible_height; y++) {
-		const uint8_t *line0 = src + (size_t)(y * 2) * src_stride;
-		const uint8_t *line1 = line0 + src_stride;
-		uint8_t *out = y_plane + (size_t)y * dst_stride;
-
-		for (x = 0; x < dst_width; x += 2) {
-			uint64_t w0, w1, rows;
-			unsigned int s0, s1;
-			uint16_t pair;
-
-			memcpy(&w0, line0 + (size_t)x * 4, 8);
-			memcpy(&w1, line1 + (size_t)x * 4, 8);
-			/* Luma of both rows in 16-bit lanes: [Y0 Y1 Y2 Y3]. */
-			rows = ((w0 >> 8) & 0x00FF00FF00FF00FFULL) +
-			       ((w1 >> 8) & 0x00FF00FF00FF00FFULL);
-			/* Output pixel x averages source (2x,2x+1) over both
-			 * rows; x+1 averages (2x+2,2x+3). */
-			s0 = (unsigned int)((rows & 0xFFFFULL) +
-					    ((rows >> 16) & 0xFFFFULL));
-			s1 = (unsigned int)(((rows >> 32) & 0xFFFFULL) +
-					    ((rows >> 48) & 0xFFFFULL));
-			pair = (uint16_t)(((s0 + 2) / 4) |
-					  ((((s1 + 2) / 4) & 0xFF) << 8));
-			memcpy(out + x, &pair, 2);
-		}
-	}
-	for (; y < dst_height; y++)
-		memcpy(y_plane + (size_t)y * dst_stride,
-		       y_plane + (size_t)(visible_height - 1) * dst_stride,
-		       dst_width);
-
-	for (y = 0; y < visible_height / 2; y++) {
-		uint8_t *out = uv_plane + (size_t)y * dst_stride;
-		unsigned int sy = y * 4;
-
-		for (x = 0; x < dst_width; x += 2) {
-			unsigned int sx = x * 2;
-			unsigned int u = 0, v = 0, row, pair;
-
-			for (row = 0; row < 4; row++) {
-				const uint8_t *line = src +
-					(size_t)(sy + row) * src_stride;
-
-				for (pair = 0; pair < 2; pair++) {
-					u += line[(sx + pair * 2) * 2];
-					v += line[(sx + pair * 2) * 2 + 2];
-				}
-			}
-			if (nv21) {
-				out[x] = (uint8_t)((v + 4) / 8);
-				out[x + 1] = (uint8_t)((u + 4) / 8);
-			} else {
-				out[x] = (uint8_t)((u + 4) / 8);
-				out[x + 1] = (uint8_t)((v + 4) / 8);
-			}
-		}
-	}
-	for (; y < dst_height / 2; y++)
-		memcpy(uv_plane + (size_t)y * dst_stride,
-		       uv_plane + (size_t)(visible_height / 2 - 1) * dst_stride,
-		       dst_width);
-
-	return 0;
-}
-
-/* ------------------------------------------------------------------ */
-/* Packed SRGGB12P -> NV12 conversion                                 */
-/* ------------------------------------------------------------------ */
-
-/* The SG2002 camera's V4L2_PIX_FMT_SRGGB12P is pRCC nibble-aligned: two
- * pixels are three bytes, with byte 0/1 holding bits 11:4 and byte 2 holding
- * pixel 0 bits 3:0 in its low nibble and pixel 1 bits 3:0 in its high nibble.
- * (This is not the common low-byte-first MIPI RAW12 spelling.)  GC4653
- * reports black near code 256 in its 12-bit range, so remove that pedestal
- * before scaling to 8 bits. */
-#define RAW12_BLACK_LEVEL 256U
-#define RAW12_MAX_LEVEL 4095U
-#define RAW12_MIN_WHITE_LEVEL 512U
-
-static unsigned int raw12_get(const uint8_t *line, unsigned int x)
-{
-	const uint8_t *p = line + (size_t)(x / 2) * 3;
-	unsigned int low = x & 1 ? p[2] >> 4 : p[2] & 0x0f;
-
-	return ((unsigned int)p[x & 1] << 4) | low;
-}
-
-static unsigned int isqrt32(unsigned int value)
-{
-	unsigned int result = 0;
-	unsigned int bit = 1U << 30;
-
-	while (bit > value)
-		bit >>= 2;
-	while (bit) {
-		if (value >= result + bit) {
-			value -= result + bit;
-			result = (result >> 1) + bit;
-		} else {
-			result >>= 1;
-		}
-		bit >>= 2;
-	}
-	return result;
-}
-
-/* Estimate a robust per-frame white point from a sparse 99.9th percentile.
- * The floor avoids turning sensor startup noise into a white frame in very
- * low light.  Sampling one pixel per 8x8 cell adds 6.25 percent to the RAW12
- * sample reads performed by the four-source-read 4x demosaic below. */
-static unsigned int raw12_white_level(const uint8_t *src,
-				      unsigned int width, unsigned int height,
-				      unsigned int stride)
-{
-	unsigned int histogram[RAW12_MAX_LEVEL + 1] = { 0 };
-	unsigned int samples = 0, target, total = 0, value, x, y;
-
-	for (y = 0; y < height; y += 8) {
-		const uint8_t *line = src + (size_t)y * stride;
-
-		for (x = 0; x < width; x += 8) {
-			histogram[raw12_get(line, x)]++;
-			samples++;
-		}
-	}
-	target = samples - samples / 1000U;
-	for (value = 0; value <= RAW12_MAX_LEVEL; value++) {
-		total += histogram[value];
-		if (total >= target)
-			break;
-	}
-	if (value < RAW12_MIN_WHITE_LEVEL)
-		value = RAW12_MIN_WHITE_LEVEL;
-	return value;
-}
-
-/* A square-root transfer gives useful shadow detail without another pass over
- * the 5.5 MiB frame.  Build the small lookup once per frame, then keep the
- * hot demosaic loop to one indexed load per sample. */
-static void raw12_level_lut(uint8_t levels[RAW12_MAX_LEVEL + 1],
-			    unsigned int white)
-{
-	const unsigned int range = white - RAW12_BLACK_LEVEL;
-	unsigned int value;
-
-	for (value = 0; value <= RAW12_MAX_LEVEL; value++) {
-		unsigned int scaled;
-
-		if (value <= RAW12_BLACK_LEVEL) {
-			levels[value] = 0;
-			continue;
-		}
-		if (value >= white) {
-			levels[value] = 255;
-			continue;
-		}
-		scaled = ((value - RAW12_BLACK_LEVEL) * 65025U + range / 2U) /
-			range;
-		levels[value] = (uint8_t)isqrt32(scaled);
-	}
-}
-
-/* Subsample one aligned 2x2 Bayer cell.  For 2x this is the complete source
- * box; for 4x it is the centred cell in that box.  raw12_to_nv12() only
- * calls this with an even/even origin (2x) or odd/odd origin (4x), because
- * the reduction factor is even and the 4x centre offset is one.  That makes
- * the Bayer layout known at compile time for every cell:
- *
- *   even/even: R G       odd/odd: B G
- *              G B                 G R
- *
- * The old generic loop counted samples and divided by 1/2 after every cell.
- * It expresses twelve channel-average divisions per 2x2 output group (about
- * 691,200 per 640x360 frame), despite all the divisors being fixed.  Keep
- * the exact rounded green average but select the four samples
- * directly.  This preserves the colour output byte-for-byte while removing
- * the dominant avoidable CPU work from the RAW camera path. */
-static void raw12_cell_rgb(const uint8_t *src, unsigned int src_stride,
-			   unsigned int sx, unsigned int sy,
-			   const uint8_t levels[RAW12_MAX_LEVEL + 1],
-			   unsigned int *red, unsigned int *green, unsigned int *blue)
-{
-	const uint8_t *line0 = src + (size_t)sy * src_stride;
-	const uint8_t *line1 = line0 + src_stride;
-	unsigned int p00 = levels[raw12_get(line0, sx)];
-	unsigned int p01 = levels[raw12_get(line0, sx + 1)];
-	unsigned int p10 = levels[raw12_get(line1, sx)];
-	unsigned int p11 = levels[raw12_get(line1, sx + 1)];
-
-	if ((sx & 1U) == 0) {
-		*red = p00;
-		*green = (p01 + p10 + 1U) >> 1;
-		*blue = p11;
-	} else {
-		*red = p11;
-		*green = (p01 + p10 + 1U) >> 1;
-		*blue = p00;
-	}
-}
-
-static unsigned int clamp_u8(int value)
-{
-	if (value < 0)
-		return 0;
-	if (value > 255)
-		return 255;
-	return (unsigned int)value;
-}
-
-/* Convert packed SRGGB12P to a tightly packed, progressive NV12 frame.
- * `visible_height` is the active image height; dst_height may include the
- * Coda macroblock padding below it.  Only exact 2x and 4x reductions are
- * accepted.  The restriction is intentional: it keeps all source accesses
- * bounded, avoids a frame-sized scratch image, and makes the result easy to
- * reason about at the camera's fixed 2560x1440 mode. */
-static int raw12_to_nv12(const uint8_t *src, unsigned int src_width,
-			 unsigned int src_height, unsigned int src_stride,
-			 uint8_t *dst, unsigned int dst_width,
-			 unsigned int visible_height, unsigned int dst_height,
-			 unsigned int dst_stride)
-{
-	uint8_t *y_plane = dst;
-	uint8_t *uv_plane;
-	uint8_t levels[RAW12_MAX_LEVEL + 1];
-	unsigned int white;
-	unsigned int scale_x, scale_y, scale, cell_offset, y, x;
-
-	if (!src || !dst || !src_width || !src_height || !dst_width ||
-	    !visible_height || (src_width & 1) || (src_height & 1) ||
-	    (dst_width & 1) || (visible_height & 1) || dst_height < visible_height ||
-	    (dst_height & 1) || src_stride < (size_t)src_width * 3 / 2 ||
-	    dst_stride < dst_width)
-		return -1;
-	if (src_width % dst_width || src_height % visible_height)
-		return -1;
-	scale_x = src_width / dst_width;
-	scale_y = src_height / visible_height;
-	if (scale_x != scale_y || (scale_x != 2 && scale_x != 4))
-		return -1;
-	scale = scale_x;
-	cell_offset = scale == 4 ? 1 : 0;
-	uv_plane = dst + (size_t)dst_stride * dst_height;
-	white = raw12_white_level(src, src_width, src_height, src_stride);
-	raw12_level_lut(levels, white);
-
-	/* Work in 2x2 output groups so chroma is the average of the same four
-	 * RGB values whose luma was written above.  This also avoids any temporary
-	 * per-frame or per-line storage. */
-	for (y = 0; y < visible_height; y += 2) {
-		uint8_t *y0 = y_plane + (size_t)y * dst_stride;
-		uint8_t *y1 = y0 + dst_stride;
-		uint8_t *uv = uv_plane + (size_t)(y / 2) * dst_stride;
-
-		for (x = 0; x < dst_width; x += 2) {
-			unsigned int r[4], g[4], b[4];
-			unsigned int n, rsum = 0, gsum = 0, bsum = 0;
-
-			raw12_cell_rgb(src, src_stride, x * scale + cell_offset,
-				       y * scale + cell_offset, levels,
-				       &r[0], &g[0], &b[0]);
-			raw12_cell_rgb(src, src_stride, (x + 1) * scale + cell_offset,
-				       y * scale + cell_offset, levels,
-				       &r[1], &g[1], &b[1]);
-			raw12_cell_rgb(src, src_stride, x * scale + cell_offset,
-				       (y + 1) * scale + cell_offset,
-				       levels,
-				       &r[2], &g[2], &b[2]);
-			raw12_cell_rgb(src, src_stride,
-				       (x + 1) * scale + cell_offset,
-				       (y + 1) * scale + cell_offset,
-				       levels,
-				       &r[3], &g[3], &b[3]);
-			for (n = 0; n < 4; n++) {
-				int yy = ((66 * (int)r[n] + 129 * (int)g[n] +
-					   25 * (int)b[n] + 128) >> 8) + 16;
-
-				yy = (int)clamp_u8(yy);
-				if (!n)
-					y0[x] = (uint8_t)yy;
-				else if (n == 1)
-					y0[x + 1] = (uint8_t)yy;
-				else if (n == 2)
-					y1[x] = (uint8_t)yy;
-				else
-					y1[x + 1] = (uint8_t)yy;
-				rsum += r[n];
-				gsum += g[n];
-				bsum += b[n];
-			}
-			/* BT.601 limited-range chroma. */
-			{
-				int ravg = (int)((rsum + 2) / 4);
-				int gavg = (int)((gsum + 2) / 4);
-				int bavg = (int)((bsum + 2) / 4);
-				int uu = ((-38 * ravg - 74 * gavg + 112 * bavg +
-					   128) >> 8) + 128;
-				int vv = ((112 * ravg - 94 * gavg - 18 * bavg +
-					   128) >> 8) + 128;
-
-				uv[x] = (uint8_t)clamp_u8(uu);
-				uv[x + 1] = (uint8_t)clamp_u8(vv);
-			}
-		}
-	}
-	for (y = visible_height; y < dst_height; y++)
-		memcpy(y_plane + (size_t)y * dst_stride,
-		       y_plane + (size_t)(visible_height - 1) * dst_stride,
-		       dst_width);
-	for (y = visible_height / 2; y < dst_height / 2; y++)
-		memcpy(uv_plane + (size_t)y * dst_stride,
-		       uv_plane + (size_t)(visible_height / 2 - 1) * dst_stride,
-		       dst_width);
-	return 0;
-}
-
-/* ------------------------------------------------------------------ */
-/* Offline file conversion                                             */
-/* ------------------------------------------------------------------ */
-
-static int uyvy_to_nvxx_file(const char *input_path, const char *output_path,
-			     unsigned int width, unsigned int height, int nv21)
-{
-	FILE *input = NULL, *output = NULL;
-	uint8_t *src = NULL, *dst = NULL;
-	size_t src_size = (size_t)width * height * 2;
-	size_t dst_size = (size_t)width * height * 3 / 2;
-	size_t got;
-	int ret = -1;
-
-	if ((width & 3) || (height & 1) || !width || !height)
-		return fprintf(stderr, "raw dimensions must be non-zero; width a multiple of 4, height even\n"), -1;
-	input = fopen(input_path, "rb");
-	if (!input) {
-		die_errno(input_path);
-		goto out;
-	}
-	output = fopen(output_path, "wb");
-	if (!output) {
-		die_errno(output_path);
-		goto out;
-	}
-	src = malloc(src_size);
-	dst = malloc(dst_size);
-	if (!src || !dst) {
-		fprintf(stderr, "raw conversion allocation failed (%zu + %zu bytes)\n",
-			src_size, dst_size);
-		goto out;
-	}
-	got = fread(src, 1, src_size, input);
-	if (got != src_size || fgetc(input) != EOF) {
-		fprintf(stderr, "%s is not exactly %zu bytes\n", input_path, src_size);
-		goto out;
-	}
-	if (uyvy_to_nvxx(src, width, height, width * 2, dst, width, height,
-			 width, nv21))
-		goto out;
-	if (fwrite(dst, 1, dst_size, output) != dst_size) {
-		die_errno("write raw output");
-		goto out;
-	}
-	ret = 0;
-out:
-	free(dst);
-	free(src);
-	if (output)
-		fclose(output);
-	if (input)
-		fclose(input);
-	return ret;
-}
-
-/* Host-side smoke-test entry point for the pure RAW12 converter.  It uses the
- * practical 4x mode (2560x1440 -> 640x360), and deliberately has the same
- * exact-size input contract as a tightly packed camera frame. */
-static int raw12_to_nv12_file(const char *input_path, const char *output_path,
-			      unsigned int width, unsigned int height)
-{
-	FILE *input = NULL, *output = NULL;
-	uint8_t *src = NULL, *dst = NULL;
-	unsigned int dst_width, dst_height;
-	size_t src_stride, src_size, dst_stride, dst_size, got;
-	int ret = -1;
-
-	if (!width || !height || (width & 3) || (height & 3)) {
-		fprintf(stderr, "RAW12 dimensions must be non-zero and divisible by 4\n");
-		return -1;
-	}
-	dst_width = width / 4;
-	dst_height = height / 4;
-	src_stride = (size_t)width * 3 / 2;
-	src_size = src_stride * height;
-	dst_stride = dst_width;
-	dst_size = dst_stride * dst_height * 3 / 2;
-	input = fopen(input_path, "rb");
-	if (!input) {
-		die_errno(input_path);
-		goto out;
-	}
-	output = fopen(output_path, "wb");
-	if (!output) {
-		die_errno(output_path);
-		goto out;
-	}
-	src = malloc(src_size);
-	dst = malloc(dst_size);
-	if (!src || !dst) {
-		fprintf(stderr, "RAW12 conversion allocation failed (%zu + %zu bytes)\n",
-			src_size, dst_size);
-		goto out;
-	}
-	got = fread(src, 1, src_size, input);
-	if (got != src_size || fgetc(input) != EOF) {
-		fprintf(stderr, "%s is not exactly %zu bytes\n", input_path, src_size);
-		goto out;
-	}
-	if (raw12_to_nv12(src, width, height, (unsigned int)src_stride,
-			  dst, dst_width, dst_height, dst_height,
-			  (unsigned int)dst_stride))
-		goto out;
-	if (fwrite(dst, 1, dst_size, output) != dst_size) {
-		die_errno("write raw output");
-		goto out;
-	}
-	ret = 0;
-out:
-	free(dst);
-	free(src);
-	if (output)
-		fclose(output);
-	if (input)
-		fclose(input);
-	return ret;
 }
 
 /* ------------------------------------------------------------------ */
@@ -820,47 +251,6 @@ static int map_queue(int fd, enum v4l2_buf_type type, unsigned int requested,
 
 /* Allocate `requested` raw-frame buffers from the system dma-heap, map them
  * cached, and register them with the encoder OUTPUT queue as DMABUF. */
-static int heap_queue(int heap_fd, int encoder_fd, enum v4l2_buf_type type,
-		      unsigned int requested, size_t size,
-		      struct mapped_queue *queue)
-{
-	struct v4l2_requestbuffers request = {
-		.count = requested,
-		.type = type,
-		.memory = V4L2_MEMORY_DMABUF,
-	};
-	unsigned int i;
-
-	if (xioctl(encoder_fd, VIDIOC_REQBUFS, &request))
-		return -1;
-	if (request.count < 1) {
-		errno = ENOBUFS;
-		return -1;
-	}
-	queue->bufs = calloc(request.count, sizeof(*queue->bufs));
-	if (!queue->bufs)
-		return -1;
-	queue->count = request.count;
-	for (i = 0; i < queue->count; i++) {
-		struct dma_heap_allocation_data alloc = {
-			.len = size,
-			.fd_flags = O_CLOEXEC | O_RDWR,
-		};
-
-		if (xioctl(heap_fd, DMA_HEAP_IOCTL_ALLOC, &alloc))
-			return -1;
-		queue->bufs[i].dmabuf_fd = (int)alloc.fd;
-		queue->bufs[i].length = size;
-		queue->bufs[i].addr = mmap(NULL, size, PROT_READ | PROT_WRITE,
-					  MAP_SHARED, (int)alloc.fd, 0);
-		if (queue->bufs[i].addr == MAP_FAILED) {
-			queue->bufs[i].addr = NULL;
-			return -1;
-		}
-	}
-	return 0;
-}
-
 static int queue_buffer(int fd, enum v4l2_buf_type type, unsigned int index,
 			unsigned int bytesused)
 {
@@ -1659,8 +1049,8 @@ static int rtsp_send_au(struct rtsp_sink *sink, const uint8_t *buf, size_t size,
 /* Feed one coded access unit to the RTSP sink; handles (re)connect and
  * parameter-set discovery.  Never blocks the pipeline for long: failures
  * flip the sink into retry-later state and streaming continues. */
-static void rtsp_offer(struct rtsp_sink *sink, const uint8_t *buf, size_t size,
-		       uint64_t pts_ms)
+static void rtsp_offer_buffer(struct rtsp_sink *sink, const uint8_t *buf,
+			      size_t size, uint64_t pts_ms)
 {
 	if (!sink->have_params) {
 		struct nal_view nals[32];
@@ -1695,6 +1085,24 @@ static void rtsp_offer(struct rtsp_sink *sink, const uint8_t *buf, size_t size,
 		fprintf(stderr, "rtsp: send failed, will retry\n");
 		rtsp_close(sink);
 	}
+}
+
+static void rtsp_offer(struct rtsp_sink *sink, const uint8_t *buf, size_t size,
+		       uint64_t pts_ms)
+{
+	/* Coda's DMA output is uncached. Copy the compressed access unit once
+	 * before the byte-wise Annex-B scans and RTP packetisation. Raw video
+	 * frames stay in the hardware DMA-BUF pipeline. */
+	uint8_t *cached = malloc(size);
+
+	if (!cached) {
+		perror("rtsp: allocate access unit");
+		rtsp_close(sink);
+		return;
+	}
+	memcpy(cached, buf, size);
+	rtsp_offer_buffer(sink, cached, size, pts_ms);
+	free(cached);
 }
 
 #ifdef ENABLE_PCMA
@@ -2224,11 +1632,8 @@ struct bridge_options {
 	unsigned int capture_buffers;
 	unsigned int frame_limit;
 	int half_scale;
-	int use_dmabuf;
-	int use_vpss;
 	int use_isp;
 	int mid_heap_reserved;
-	uint32_t encoder_input_format; /* V4L2_PIX_FMT_NV21 or NV12 */
 };
 
 static const char *init_step;
@@ -2237,472 +1642,6 @@ static void die_step(void)
 {
 	fprintf(stderr, "live bridge at %s: %s\n", init_step ? init_step : "?",
 		strerror(errno));
-}
-
-static int live_bridge(const struct bridge_options *opts)
-{
-	int capture_fd = -1, encoder_fd = -1, output_fd = -1, heap_fd = -1;
-	struct mapped_queue capture_queue = { 0 }, encoder_out = { 0 }, encoder_cap = { 0 };
-	unsigned char *output_queued = NULL;
-	struct v4l2_pix_format capture_fmt, encoder_out_fmt, encoder_cap_fmt;
-	unsigned int i, free_output = 0, held_capture = UINT32_MAX;
-	unsigned int visible_width, visible_height, coded_height;
-	uint64_t frames = 0, encoded_frames = 0, encoded_bytes = 0;
-	uint64_t skipped_frames = 0;
-	uint64_t start_ms = 0, last_stats_ms = 0, last_stats_frames = 0;
-	uint64_t last_stats_skipped = 0, next_frame_ns = 0;
-	uint64_t frame_interval_ns = 0;
-	int capture_on = 0, encoder_out_on = 0, encoder_cap_on = 0, ret = -1;
-	int use_dmabuf = opts->use_dmabuf;
-	int raw12 = 0, nv21;
-	uint32_t encoder_input_format;
-	struct rtsp_sink rtsp;
-#ifdef ENABLE_PCMA
-	struct audio_source audio = { 0 };
-#endif
-
-	if (opts->max_fps)
-		frame_interval_ns = 1000000000ULL / opts->max_fps;
-
-#ifdef ENABLE_PCMA
-	rtsp_init(&rtsp);
-	rtsp.audio_enabled = opts->audio_pcma_device != NULL;
-#else
-	memset(&rtsp, 0, sizeof(rtsp));
-	rtsp.fd = -1;
-#endif
-	if (opts->rtsp_url && rtsp_parse_url(&rtsp, opts->rtsp_url)) {
-		fprintf(stderr, "bad rtsp url: %s\n", opts->rtsp_url);
-		return -1;
-	}
-#ifndef ENABLE_PCMA
-	rtsp.rtp_ssrc = 0x53324732; /* "S2G2" */
-#endif
-
-	capture_fd = open(opts->capture_path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
-	if (capture_fd < 0) {
-		die_errno(opts->capture_path);
-		goto out;
-	}
-	encoder_fd = open(opts->encoder_path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
-	if (encoder_fd < 0) {
-		die_errno(opts->encoder_path);
-		goto out;
-	}
-	if (opts->output_path) {
-		if (!strcmp(opts->output_path, "-"))
-			output_fd = STDOUT_FILENO;
-		else
-			output_fd = open(opts->output_path,
-					 O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
-					 0644);
-		if (output_fd < 0) {
-			die_errno(opts->output_path);
-			goto out;
-		}
-	}
-	if (get_format(capture_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE, &capture_fmt))
-		goto out_errno;
-	raw12 = capture_fmt.pixelformat == V4L2_PIX_FMT_SRGGB12P;
-	if ((!raw12 && capture_fmt.pixelformat != V4L2_PIX_FMT_UYVY) ||
-	    capture_fmt.width < 4 || capture_fmt.height < 2 ||
-	    (raw12 ? capture_fmt.bytesperline < (size_t)capture_fmt.width * 3 / 2 :
-	     capture_fmt.bytesperline < (size_t)capture_fmt.width * 2)) {
-		fprintf(stderr, "capture must provide packed UYVY or SRGGB12P with a valid stride\n");
-		goto out;
-	}
-	if (raw12) {
-		unsigned int raw_scale = opts->half_scale ? 2 : 4;
-
-		if (opts->use_vpss) {
-			fprintf(stderr, "SRGGB12P capture requires --scaler cpu; VPSS accepts UYVY only\n");
-			goto out;
-		}
-		if (capture_fmt.width % raw_scale || capture_fmt.height % raw_scale) {
-			fprintf(stderr, "SRGGB12P dimensions %ux%u do not support an exact %ux reduction\n",
-				capture_fmt.width, capture_fmt.height, raw_scale);
-			goto out;
-		}
-		visible_width = capture_fmt.width / raw_scale;
-		visible_height = capture_fmt.height / raw_scale;
-	} else {
-		if ((capture_fmt.width & 3) || (opts->half_scale && (capture_fmt.height & 3))) {
-			fprintf(stderr, "capture width must be a multiple of 4 (half scale: height of 4)\n");
-			goto out;
-		}
-		visible_width = opts->half_scale ? capture_fmt.width / 2 : capture_fmt.width;
-		visible_height = opts->half_scale ? capture_fmt.height / 2 : capture_fmt.height;
-	}
-	/* RAW12 is always converted to NV12.  Keep the existing UYVY default and
-	 * --format nv21 behaviour unchanged. */
-	encoder_input_format = raw12 ? V4L2_PIX_FMT_NV12 : opts->encoder_input_format;
-	nv21 = encoder_input_format == V4L2_PIX_FMT_NV21;
-	coded_height = (visible_height + 15U) & ~15U;
-	/* Coda reads a macroblock surface even when the visible frame is 1080
-	 * lines.  Negotiate that padded surface first, crop it to the source
-	 * height, and only then configure CAPTURE.  Doing this in another order can
-	 * leave the firmware with a 1920x1080 stride/height mismatch. */
-	if (set_encoder_format(encoder_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT,
-			       encoder_input_format, visible_width,
-			       coded_height, &encoder_out_fmt))
-		goto out_errno;
-	if (set_output_crop(encoder_fd, visible_width, visible_height))
-		goto out_errno;
-	if (get_format(encoder_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT, &encoder_out_fmt))
-		goto out_errno;
-	if (set_encoder_format(encoder_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE,
-			       V4L2_PIX_FMT_H264, visible_width,
-			       visible_height, &encoder_cap_fmt))
-		goto out_errno;
-	if ((encoder_out_fmt.width & 3) || (encoder_out_fmt.height & 1) ||
-	    encoder_out_fmt.bytesperline < encoder_out_fmt.width ||
-	    encoder_out_fmt.sizeimage < (size_t)encoder_out_fmt.bytesperline *
-					encoder_out_fmt.height * 3 / 2) {
-		fprintf(stderr, "encoder did not return a usable output format\n");
-		goto out;
-	}
-	if (encoder_cap_fmt.pixelformat != V4L2_PIX_FMT_H264)
-		goto out;
-	if (set_encoder_controls(encoder_fd, opts->bitrate, opts->gop))
-		fprintf(stderr, "warning: encoder controls rejected, running firmware defaults\n");
-
-	/* Encoder OUTPUT buffers: cached dma-heap import when possible. */
-	if (use_dmabuf) {
-		init_step = "open " DMA_HEAP_CMA;
-		heap_fd = open(DMA_HEAP_CMA, O_RDONLY | O_CLOEXEC);
-		if (heap_fd < 0) {
-			init_step = "open " DMA_HEAP_CMA_OLD;
-			heap_fd = open(DMA_HEAP_CMA_OLD, O_RDONLY | O_CLOEXEC);
-		}
-		if (heap_fd < 0) {
-			init_step = "open " DMA_HEAP_SYSTEM;
-			heap_fd = open(DMA_HEAP_SYSTEM, O_RDONLY | O_CLOEXEC);
-		}
-		if (heap_fd < 0) {
-			fprintf(stderr, "no dma-heaps (%s), using --io mmap\n",
-				strerror(errno));
-			use_dmabuf = 0;
-		}
-	}
-	init_step = "encoder output buffer allocation";
-	if (use_dmabuf) {
-		if (heap_queue(heap_fd, encoder_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT,
-			       ENCODER_OUT_BUFFERS, encoder_out_fmt.sizeimage,
-			       &encoder_out))
-			goto out_errno;
-	} else {
-		if (map_queue(encoder_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT,
-			      ENCODER_OUT_BUFFERS, &encoder_out))
-			goto out_errno;
-	}
-	output_queued = calloc(encoder_out.count, sizeof(*output_queued));
-	if (!output_queued)
-		goto out_errno;
-	init_step = "encoder capture buffer allocation";
-	if (map_queue(encoder_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE,
-		      ENCODER_CAP_BUFFERS, &encoder_cap))
-		goto out_errno;
-	init_step = "encoder capture QBUF";
-	for (i = 0; i < encoder_cap.count; i++)
-		if (queue_buffer(encoder_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE, i, 0))
-			goto out_errno;
-	/* Prime Coda before allocating the large CSI buffers.  This gives its
-	 * reconstruction surfaces first claim on the media pool.  The black frame
-	 * is also a valid reference picture for the first live frame. */
-	{
-		size_t luma_size = (size_t)encoder_out_fmt.bytesperline *
-			encoder_out_fmt.height;
-		size_t frame_size = luma_size * 3 / 2;
-
-		if (frame_size > UINT32_MAX ||
-		    frame_size > encoder_out.bufs[0].length) {
-			fprintf(stderr, "encoder priming buffer is too small\n");
-			goto out;
-		}
-		memset(encoder_out.bufs[0].addr, 16, luma_size);
-		memset((uint8_t *)encoder_out.bufs[0].addr + luma_size, 128,
-		       frame_size - luma_size);
-		if (use_dmabuf) {
-			struct dma_buf_sync sync = {
-				.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW,
-			};
-
-			init_step = "priming DMA_BUF_IOCTL_SYNC";
-			if (xioctl(encoder_out.bufs[0].dmabuf_fd,
-				   DMA_BUF_IOCTL_SYNC, &sync))
-				goto out_errno;
-			init_step = "priming QBUF (dmabuf import)";
-			if (queue_dmabuf(encoder_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT,
-					 0, encoder_out.bufs[0].dmabuf_fd,
-					 (unsigned int)frame_size))
-				goto out_errno;
-		} else {
-			if (queue_buffer(encoder_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT,
-					 0, (unsigned int)frame_size))
-				goto out_errno;
-		}
-		output_queued[0] = 1;
-		free_output = encoder_out.count - 1;
-	}
-	init_step = "encoder capture STREAMON";
-	if (stream(encoder_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE, 1))
-		goto out_errno;
-	encoder_cap_on = 1;
-	init_step = "encoder output STREAMON";
-	if (stream(encoder_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT, 1))
-		goto out_errno;
-	encoder_out_on = 1;
-	init_step = "CSI capture buffer allocation";
-	if (map_queue(capture_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE,
-		      opts->capture_buffers, &capture_queue))
-		goto out_errno;
-	init_step = "CSI capture QBUF";
-	for (i = 0; i < capture_queue.count; i++)
-		if (queue_buffer(capture_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE, i, 0))
-			goto out_errno;
-	init_step = "CSI capture STREAMON";
-	if (stream(capture_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE, 1))
-		goto out_errno;
-	capture_on = 1;
-#ifdef ENABLE_PCMA
-	if (opts->audio_pcma_device && audio_open(&audio, opts->audio_pcma_device))
-		goto out;
-#endif
-	fprintf(stderr, "bridge %s (%ux%u stride %u) -> %s %s (%ux%u stride %u) io=%s bitrate=%u gop=%u\n",
-		opts->capture_path, capture_fmt.width, capture_fmt.height,
-		capture_fmt.bytesperline, opts->encoder_path,
-		nv21 ? "NV21" : "NV12", encoder_out_fmt.width,
-		encoder_out_fmt.height, encoder_out_fmt.bytesperline,
-		use_dmabuf ? "dmabuf" : "mmap", opts->bitrate, opts->gop);
-	start_ms = now_ms();
-	last_stats_ms = start_ms;
-
-	while (!stop_requested) {
-		struct v4l2_buffer buffer;
-		int progress = 0;
-
-#ifdef ENABLE_PCMA
-		if (audio.pcm && audio_drain(&audio, &rtsp))
-			goto out;
-#endif
-		/* Drain encoded CAPTURE buffers and forward to the sinks. */
-		for (;;) {
-			uint64_t pts_ms;
-
-			if (dequeue_buffer(encoder_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE,
-					   &buffer)) {
-				if (errno == EAGAIN)
-					break;
-				goto out_errno;
-			}
-			if (buffer.index >= encoder_cap.count ||
-			    buffer.bytesused > encoder_cap.bufs[buffer.index].length ||
-			    (buffer.flags & V4L2_BUF_FLAG_ERROR) || !buffer.bytesused) {
-				fprintf(stderr, "encoder returned an invalid capture buffer\n");
-				goto out;
-			}
-			pts_ms = (uint64_t)buffer.timestamp.tv_sec * 1000ULL +
-				(uint64_t)buffer.timestamp.tv_usec / 1000;
-			if (!pts_ms)
-				pts_ms = now_ms();
-			if (output_fd >= 0 && buffer.bytesused &&
-			    write_all(output_fd, encoder_cap.bufs[buffer.index].addr,
-				      buffer.bytesused))
-				goto out_errno;
-			if (opts->rtsp_url && buffer.bytesused)
-				rtsp_offer(&rtsp, encoder_cap.bufs[buffer.index].addr,
-					   buffer.bytesused, pts_ms);
-			encoded_frames++;
-			encoded_bytes += buffer.bytesused;
-			if (live_frame_limit_reached(opts->frame_limit, encoded_frames)) {
-				stop_requested = 1;
-				break;
-			}
-			if (queue_buffer(encoder_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE,
-					 buffer.index, 0))
-				goto out_errno;
-			progress = 1;
-		}
-		/* Return completed OUTPUT buffers to the free pool. */
-		for (;;) {
-			if (dequeue_buffer(encoder_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT,
-					   &buffer)) {
-				if (errno == EAGAIN)
-					break;
-				goto out_errno;
-			}
-			if (buffer.index >= encoder_out.count || !output_queued[buffer.index]) {
-				fprintf(stderr, "encoder returned an unexpected output buffer\n");
-				goto out;
-			}
-			output_queued[buffer.index] = 0;
-			free_output++;
-			progress = 1;
-		}
-		if (held_capture == UINT32_MAX) {
-			if (!dequeue_buffer(capture_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE,
-					    &buffer))
-				held_capture = buffer.index;
-			else if (errno != EAGAIN)
-				goto out_errno;
-		}
-		if (held_capture != UINT32_MAX && free_output) {
-			struct v4l2_buffer out_buffer;
-			unsigned int dst_size = encoder_out_fmt.bytesperline *
-					encoder_out_fmt.height * 3 / 2;
-			unsigned int source_index = held_capture;
-			unsigned int output_index;
-
-			/* Requeue excess CSI frames before touching their RAW Bayer data.
-			 * Keeping both shallow capture buffers circulating matters more than
-			 * an exact phase: the sensor stays healthy, while max-fps remains a
-			 * ceiling rather than a promise. */
-			if (frame_interval_ns) {
-				uint64_t now = now_ns();
-
-				if (next_frame_ns && now < next_frame_ns) {
-					if (queue_buffer(capture_fd,
-							 V4L2_BUF_TYPE_VIDEO_CAPTURE,
-							 held_capture, 0))
-						goto out_errno;
-					held_capture = UINT32_MAX;
-					skipped_frames++;
-					progress = 1;
-					continue;
-				}
-				next_frame_ns = now + frame_interval_ns;
-			}
-
-			for (output_index = 0; output_index < encoder_out.count;
-			     output_index++)
-				if (!output_queued[output_index])
-					break;
-			if (output_index == encoder_out.count ||
-			    dst_size > encoder_out.bufs[output_index].length) {
-				fprintf(stderr, "no usable free encoder output buffer\n");
-				goto out;
-			}
-			if (raw12 ?
-			     raw12_to_nv12(capture_queue.bufs[source_index].addr,
-				capture_fmt.width, capture_fmt.height,
-				capture_fmt.bytesperline,
-				encoder_out.bufs[output_index].addr,
-				encoder_out_fmt.width, visible_height,
-				encoder_out_fmt.height,
-				encoder_out_fmt.bytesperline) :
-			     (opts->half_scale ?
-			     uyvy_to_nvxx_half(capture_queue.bufs[source_index].addr,
-				capture_fmt.width, capture_fmt.height,
-				capture_fmt.bytesperline,
-				encoder_out.bufs[output_index].addr,
-				encoder_out_fmt.width, visible_height,
-				encoder_out_fmt.height,
-				encoder_out_fmt.bytesperline, nv21) :
-			     uyvy_to_nvxx(capture_queue.bufs[source_index].addr,
-				capture_fmt.width, capture_fmt.height,
-				capture_fmt.bytesperline,
-				encoder_out.bufs[output_index].addr,
-				encoder_out_fmt.width, encoder_out_fmt.height,
-				encoder_out_fmt.bytesperline, nv21))) {
-				fprintf(stderr, raw12 ?
-					"SRGGB12P->NV12 conversion rejected negotiated geometry (only exact 2x/4x reductions are supported)\n" :
-					"UYVY->NVxx conversion rejected negotiated geometry\n");
-				goto out;
-			}
-			memset(&out_buffer, 0, sizeof(out_buffer));
-			out_buffer.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-			out_buffer.index = output_index;
-			out_buffer.bytesused = dst_size;
-			if (use_dmabuf) {
-				struct dma_buf_sync sync = {
-					.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW,
-				};
-
-				out_buffer.memory = V4L2_MEMORY_DMABUF;
-				out_buffer.m.fd = encoder_out.bufs[output_index].dmabuf_fd;
-				if (xioctl(out_buffer.m.fd, DMA_BUF_IOCTL_SYNC, &sync))
-					goto out_errno;
-			} else {
-				out_buffer.memory = V4L2_MEMORY_MMAP;
-			}
-			if (xioctl(encoder_fd, VIDIOC_QBUF, &out_buffer))
-				goto out_errno;
-			output_queued[output_index] = 1;
-			free_output--;
-			if (queue_buffer(capture_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE,
-					 source_index, 0))
-				goto out_errno;
-			held_capture = UINT32_MAX;
-			frames++;
-			progress = 1;
-		}
-		{
-			uint64_t now = now_ms();
-
-			if (now - last_stats_ms >= 5000) {
-				uint64_t delta = now - last_stats_ms;
-				uint64_t df = encoded_frames - last_stats_frames;
-				uint64_t ds = skipped_frames - last_stats_skipped;
-
-				fprintf(stderr, "stats: %.1f fps encoded (%" PRIu64
-					" total, %.1f kB/s, %" PRIu64 " max-fps skips)\n",
-					delta ? (double)df * 1000.0 / (double)delta : 0,
-					encoded_frames,
-					delta ? (double)encoded_bytes / 1024.0 *
-					1000.0 / (double)(now - start_ms) : 0, ds);
-				last_stats_ms = now;
-				last_stats_frames = encoded_frames;
-				last_stats_skipped = skipped_frames;
-			}
-		}
-		if (!progress) {
-			struct pollfd fds[2] = {
-				{ .fd = capture_fd, .events = POLLIN },
-				{ .fd = encoder_fd, .events = POLLIN | POLLOUT },
-			};
-			if (poll(fds, 2,
-#ifdef ENABLE_PCMA
-				 audio.pcm ? 20 : 1000
-#else
-				 1000
-#endif
-				 ) < 0 && errno != EINTR)
-				goto out_errno;
-		}
-	}
-	fprintf(stderr, "stopped after %" PRIu64 " submitted frames, %" PRIu64
-		" encoded frames, %" PRIu64 " encoded bytes, %" PRIu64
-		" max-fps skips\n",
-		frames, encoded_frames, encoded_bytes, skipped_frames);
-	init_step = "bounded capture completion";
-	ret = report_live_frames(opts->frame_limit, encoded_frames);
-out_errno:
-	if (ret)
-		die_step();
-out:
-	if (capture_on)
-		stream(capture_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE, 0);
-	if (encoder_out_on)
-		stream(encoder_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT, 0);
-	if (encoder_cap_on)
-		stream(encoder_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE, 0);
-	unmap_queue(&encoder_cap);
-	unmap_queue(&encoder_out);
-	unmap_queue(&capture_queue);
-	free(output_queued);
-#ifdef ENABLE_PCMA
-	audio_close(&audio);
-#endif
-	rtsp_close(&rtsp);
-	if (heap_fd >= 0)
-		close(heap_fd);
-	if (encoder_fd >= 0)
-		close(encoder_fd);
-	if (capture_fd >= 0)
-		close(capture_fd);
-	if (output_fd >= 0 && output_fd != STDOUT_FILENO)
-		close(output_fd);
-	return ret;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2735,6 +1674,9 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 	unsigned int visible_width, visible_height, coded_height;
 	uint64_t frames = 0, encoded_frames = 0, encoded_bytes = 0;
 	uint64_t start_ms = 0, last_stats_ms = 0, last_stats_frames = 0;
+	uint64_t skipped_frames = 0, last_stats_skipped = 0, next_frame_ns = 0;
+	uint64_t frame_interval_ns = opts->max_fps ?
+		1000000000ULL / opts->max_fps : 0;
 	int capture_on = 0, encoder_out_on = 0, encoder_cap_on = 0;
 	int scaler_out_on = 0, scaler_cap_on = 0, ret = -1;
 	struct rtsp_sink rtsp;
@@ -2824,7 +1766,7 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 	 * CAPTURE surface layout. */
 	init_step = "encoder OUTPUT S_FMT";
 	if (set_video_format(encoder_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT,
-			       opts->encoder_input_format, visible_width,
+			       V4L2_PIX_FMT_NV12, visible_width,
 			       coded_height, &capture_fmt, &encoder_out_fmt))
 		goto out_errno;
 	init_step = "encoder OUTPUT crop";
@@ -2857,7 +1799,7 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 	}
 	init_step = "scaler CAPTURE S_FMT";
 	if (set_video_format(scaler_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE,
-			       opts->encoder_input_format, encoder_out_fmt.width,
+			       V4L2_PIX_FMT_NV12, encoder_out_fmt.width,
 			       encoder_out_fmt.height, &capture_fmt, &scaler_out_fmt))
 		goto out_errno;
 	if (scaler_out_fmt.bytesperline != encoder_out_fmt.bytesperline ||
@@ -2878,18 +1820,8 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 			},
 		};
 
-		if (xioctl(scaler_fd, VIDIOC_S_SELECTION, &selection)) {
-			if (errno == EINVAL &&
-			    encoder_out_fmt.height == visible_height) {
-				fprintf(stderr, "warning: scaler has no CAPTURE crop; unpadded surface fits anyway\n");
-			} else if (errno == EINVAL) {
-				fprintf(stderr, "scaler driver lacks CAPTURE crop, cannot emit the %ux%u surface\n",
-					encoder_out_fmt.width, encoder_out_fmt.height);
-				goto out;
-			} else {
-				goto out_errno;
-			}
-		}
+		if (xioctl(scaler_fd, VIDIOC_S_SELECTION, &selection))
+			goto out_errno;
 	}
 
 	/* Middle buffers: heap-allocated, imported by both the scaler
@@ -2899,16 +1831,8 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 	heap_fd = open(opts->mid_heap_reserved ? DMA_HEAP_RESERVED : DMA_HEAP_CMA,
 		       O_RDONLY | O_CLOEXEC);
 	if (heap_fd < 0 && !opts->mid_heap_reserved) {
-		init_step = "open " DMA_HEAP_CMA_OLD;
-		heap_fd = open(DMA_HEAP_CMA_OLD, O_RDONLY | O_CLOEXEC);
-	}
-	if (heap_fd < 0 && !opts->mid_heap_reserved) {
 		init_step = "open " DMA_HEAP_RESERVED;
 		heap_fd = open(DMA_HEAP_RESERVED, O_RDONLY | O_CLOEXEC);
-	}
-	if (heap_fd < 0) {
-		init_step = "open " DMA_HEAP_SYSTEM;
-		heap_fd = open(DMA_HEAP_SYSTEM, O_RDONLY | O_CLOEXEC);
 	}
 	if (heap_fd < 0)
 		goto out_errno;
@@ -3060,7 +1984,7 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 	fprintf(stderr, "bridge %s (%ux%u) -> %s (%s %ux%u crop %ux%u) -> %s %s io=vpss-dmabuf bitrate=%u gop=%u\n",
 		opts->capture_path, capture_fmt.width, capture_fmt.height,
 		opts->scaler_path,
-		opts->encoder_input_format == V4L2_PIX_FMT_NV21 ? "NV21" : "NV12",
+		"NV12",
 		scaler_out_fmt.width, scaler_out_fmt.height,
 		visible_width, visible_height,
 		opts->encoder_path, encoder_cap_fmt.pixelformat == V4L2_PIX_FMT_H264 ? "h264" : "?",
@@ -3178,6 +2102,19 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 		if (held_capture != UINT32_MAX && free_mid) {
 			unsigned int mid_index;
 
+			/* Return excess frames before VPSS or Coda sees them. Do not
+			 * sleep while holding one of the shallow capture buffers. */
+			if (frame_interval_ns &&
+			    !frame_due(now_ns(), frame_interval_ns, &next_frame_ns)) {
+				if (queue_buffer(capture_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE,
+						 held_capture, 0))
+					goto out_errno;
+				held_capture = UINT32_MAX;
+				skipped_frames++;
+				progress = 1;
+				continue;
+			}
+
 			for (mid_index = 0; mid_index < mid.count; mid_index++)
 				if (mid_state[mid_index] == MID_FREE)
 					break;
@@ -3206,20 +2143,41 @@ static int live_bridge_vpss(const struct bridge_options *opts)
 				uint64_t df = encoded_frames - last_stats_frames;
 
 				fprintf(stderr, "stats: %.1f fps encoded (%" PRIu64
-					" total, %.1f kB/s)\n",
+					" total, %.1f kB/s, %" PRIu64 " max-fps skips)\n",
 					delta ? (double)df * 1000.0 / (double)delta : 0,
 					encoded_frames,
 					delta ? (double)encoded_bytes / 1024.0 *
-					1000.0 / (double)(now - start_ms) : 0);
+					1000.0 / (double)(now - start_ms) : 0,
+					skipped_frames - last_stats_skipped);
 				last_stats_ms = now;
 				last_stats_frames = encoded_frames;
+				last_stats_skipped = skipped_frames;
 			}
 		}
 		if (!progress) {
+			int scaler_busy = 0;
+			unsigned int slot;
+
+			for (slot = 0; slot < mid.count; slot++)
+				if (mid_state[slot] == MID_AT_VPSS)
+					scaler_busy = 1;
+
 			struct pollfd fds[3] = {
-				{ .fd = capture_fd, .events = POLLIN },
-				{ .fd = scaler_fd, .events = POLLIN | POLLOUT },
-				{ .fd = encoder_fd, .events = POLLIN | POLLOUT },
+				/* A held frame is waiting for a middle buffer, and
+				 * only the scaler or encoder can free one. The CSI
+				 * node stays readable meanwhile and must not wake
+				 * the loop, or it spins. poll() ignores fd -1.
+				 */
+				{ .fd = held_capture == UINT32_MAX ? capture_fd : -1,
+				  .events = POLLIN },
+				/* An m2m job finishes its OUTPUT and CAPTURE
+				 * buffers together, so POLLIN covers both. An
+				 * m2m node with nothing queued on either side
+				 * reports POLLERR at once, so leave the idle
+				 * scaler out as well.
+				 */
+				{ .fd = scaler_busy ? scaler_fd : -1, .events = POLLIN },
+				{ .fd = encoder_fd, .events = POLLIN },
 			};
 			if (poll(fds, 3,
 #ifdef ENABLE_PCMA
@@ -3281,35 +2239,27 @@ static void usage(const char *program)
 {
 	fprintf(stderr,
 		"usage: %s [capture-node] [encoder-node] [options]\n"
-		"       %s [capture-node] [encoder-node] [h264-output|-] [full|half]   (legacy)\n"
-		"       %s --raw nv12|nv21|srggb12 width height input.raw output.raw\n"
+		"default nodes use stable /dev/v4l/by-path platform links\n"
 		"\n"
 		"options:\n"
 		"  --output PATH|-      write the Annex-B stream (repeatable with --rtsp)\n"
 		"  --rtsp URL           publish via RTSP (rtsp://host[:8554]/hdmi)\n"
-		"  --size full|half     UYVY: half = 2x downscale (default full);\n"
-		"                       SRGGB12P: default = 4x to 640x360, half = 2x\n"
-		"  --format nv21|nv12   encoder input format (default nv21 staged; nv12\n"
-		"                       needs a kernel with fixed direct input; SRGGB12P\n"
-		"                       always uses NV12)\n"
-		"  --io dmabuf|mmap     raw-frame buffers: cached dma-heap (default) or vb2 mmap\n"
-		"  --scaler cpu|vpss    cpu = software UYVY->NVxx (default); vpss = hardware\n"
-		"                       scaler/CSC via the mem2mem node, zero-copy dmabuf chain\n"
+		"  --size full|half     HDMI: full resolution or 2x downscale (default full)\n"
 		"  --scaler-node PATH   VPSS mem2mem node (default " DEFAULT_SCALER ")\n"
 		"  --isp               select hardware Bayer->NV21 capture and VPSS->NV12;\n"
 		"                       quarter size (640x360 on GC4653), or --size half\n"
 		"  --frames N          stop after N encoded live frames, excluding the one\n"
 		"                       priming picture retained in the stream (default unlimited)\n"
-		"  --mid-buffers N      vpss mode: shared scaler/encoder buffers (default 4)\n"
-		"  --heap auto|reserved vpss mode: middle-buffer heap (default auto: CMA,\n"
-		"                       then the reserved media pool, then system)\n"
+		"  --mid-buffers N      shared scaler/encoder buffers (default 4)\n"
+		"  --heap auto|reserved middle-buffer heap (default auto: CMA,\n"
+		"                       then the reserved media pool)\n"
 		"  --capture-buffers N  CSI queue depth (default 2 for the camera's\n"
 		"                       shared capture/Coda media-pool budget)\n"
 		"  --bitrate N          encoder bitrate bit/s (default 4000000)\n"
 		"  --gop N              encoder GOP size (default 30)\n"
-		"  --max-fps N          cap CPU conversion/encode rate; requeue excess CSI\n"
-		"                       frames before conversion (default unlimited)\n",
-		program, program, program);
+		"  --max-fps N          cap scaling and encode rate; requeue\n"
+		"                       excess capture frames (default unlimited)\n",
+		program);
 #ifdef ENABLE_PCMA
 	fputs("  --audio-pcma DEVICE  opt-in ALSA capture: 48 kHz stereo S16_LE to\n"
 	      "                       PCMA/8 kHz mono RTP (requires --rtsp)\n"
@@ -3335,13 +2285,8 @@ int main(int argc, char **argv)
 		.mid_buffers = SCALER_MID_BUFFERS,
 		.capture_buffers = CAPTURE_BUFFERS,
 		.half_scale = 0,
-		.use_dmabuf = 1,
-		.use_vpss = 0,
-		.encoder_input_format = V4L2_PIX_FMT_NV21,
 	};
 	struct sigaction action = { .sa_handler = on_signal };
-	unsigned int width, height;
-	int nv21;
 	int i;
 	int positional = 0;
 
@@ -3349,20 +2294,6 @@ int main(int argc, char **argv)
 	if (argc == 2 && !strcmp(argv[1], "--selftest-pcma"))
 		return pcma_selftest() ? EXIT_FAILURE : EXIT_SUCCESS;
 #endif
-	if (argc >= 2 && !strcmp(argv[1], "--raw")) {
-		if (argc != 7 || (strcmp(argv[2], "nv12") && strcmp(argv[2], "nv21") &&
-			   strcmp(argv[2], "srggb12")) ||
-		    parse_u32(argv[3], &width) || parse_u32(argv[4], &height)) {
-			usage(argv[0]);
-			return EXIT_FAILURE;
-		}
-		if (!strcmp(argv[2], "srggb12"))
-			return raw12_to_nv12_file(argv[5], argv[6], width, height) ?
-				EXIT_FAILURE : EXIT_SUCCESS;
-		nv21 = !strcmp(argv[2], "nv21");
-		return uyvy_to_nvxx_file(argv[5], argv[6], width, height, nv21) ?
-			EXIT_FAILURE : EXIT_SUCCESS;
-	}
 	for (i = 1; i < argc; i++) {
 		const char *arg = argv[i];
 
@@ -3378,21 +2309,6 @@ int main(int argc, char **argv)
 			if (strcmp(argv[++i], "half") == 0)
 				opts.half_scale = 1;
 			else if (strcmp(argv[i], "full"))
-				goto bad_usage;
-		} else if (!strcmp(arg, "--format") && i + 1 < argc) {
-			if (!strcmp(argv[++i], "nv12"))
-				opts.encoder_input_format = V4L2_PIX_FMT_NV12;
-			else if (strcmp(argv[i], "nv21"))
-				goto bad_usage;
-		} else if (!strcmp(arg, "--io") && i + 1 < argc) {
-			if (!strcmp(argv[++i], "mmap"))
-				opts.use_dmabuf = 0;
-			else if (strcmp(argv[i], "dmabuf"))
-				goto bad_usage;
-		} else if (!strcmp(arg, "--scaler") && i + 1 < argc) {
-			if (!strcmp(argv[++i], "vpss"))
-				opts.use_vpss = 1;
-			else if (strcmp(argv[i], "cpu"))
 				goto bad_usage;
 		} else if (!strcmp(arg, "--isp")) {
 			opts.use_isp = 1;
@@ -3430,13 +2346,6 @@ int main(int argc, char **argv)
 		} else if (arg[0] != '-' && positional == 1) {
 			opts.encoder_path = arg;
 			positional++;
-		} else if (arg[0] != '-' && positional == 2) {
-			opts.output_path = arg; /* legacy positional output */
-			positional++;
-		} else if (arg[0] != '-' && positional == 3 &&
-			   (!strcmp(arg, "full") || !strcmp(arg, "half"))) {
-			opts.half_scale = !strcmp(arg, "half");
-			positional++;
 		} else {
 			goto bad_usage;
 		}
@@ -3454,17 +2363,7 @@ int main(int argc, char **argv)
 	if (sigemptyset(&action.sa_mask) || sigaction(SIGINT, &action, NULL) ||
 	    sigaction(SIGTERM, &action, NULL))
 		return EXIT_FAILURE;
-	if (opts.use_isp) {
-		opts.use_vpss = 1;
-		opts.encoder_input_format = V4L2_PIX_FMT_NV12;
-	}
-	if (opts.use_vpss && opts.max_fps) {
-		fprintf(stderr, "--max-fps is not supported with --scaler vpss\n");
-		goto bad_usage;
-	}
-	if (opts.use_vpss)
-		return live_bridge_vpss(&opts) ? EXIT_FAILURE : EXIT_SUCCESS;
-	return live_bridge(&opts) ? EXIT_FAILURE : EXIT_SUCCESS;
+	return live_bridge_vpss(&opts) ? EXIT_FAILURE : EXIT_SUCCESS;
 
 bad_usage:
 	usage(argv[0]);

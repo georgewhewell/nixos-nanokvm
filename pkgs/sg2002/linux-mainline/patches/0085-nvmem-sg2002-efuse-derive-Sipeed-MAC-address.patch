@@ -1,0 +1,137 @@
+From: George Whewell <georgerw@gmail.com>
+Subject: [PATCH] nvmem: sg2002-efuse: derive Sipeed's MAC address from the UID
+
+The SG2002 GMAC has no fused MAC address. Sipeed's firmware derives one
+from the eFuse UID instead: 48:da:35:6f followed by the first two bytes
+of SHA-512 over the vendor base_uid text, "UID: %08x_%08x\n" (S10uuid in
+LicheeRV-Nano-Build). NanoKVM firmware uses the same script.
+
+Post-process a mac-address cell covering the UID into that address, so
+of_get_mac_address() gives a board the same MAC under vendor and
+mainline kernels.
+
+Signed-off-by: George Whewell <georgerw@gmail.com>
+---
+diff --git a/Documentation/devicetree/bindings/nvmem/sophgo,sg2002-efuse.yaml b/Documentation/devicetree/bindings/nvmem/sophgo,sg2002-efuse.yaml
+index 33f084e5f..cf300d6f9 100644
+--- a/Documentation/devicetree/bindings/nvmem/sophgo,sg2002-efuse.yaml
++++ b/Documentation/devicetree/bindings/nvmem/sophgo,sg2002-efuse.yaml
+@@ -17,6 +17,9 @@ description: |
+   offsets are relative to the shadow aperture, not to the controller base.
+   The device ID is not specified to be a unique serial number.
+ 
++  A cell named mac-address covering the eight-byte UID reads as the
++  six-byte Ethernet MAC address that Sipeed's firmware derives from it.
++
+ allOf:
+   - $ref: nvmem.yaml#
+ 
+@@ -61,5 +64,9 @@ examples:
+             uid@c {
+                 reg = <0x0c 0x8>;
+             };
++
++            mac-address@c {
++                reg = <0x0c 0x8>;
++            };
+         };
+     };
+diff --git a/drivers/nvmem/Kconfig b/drivers/nvmem/Kconfig
+index 2879e8bfc..93bf78299 100644
+--- a/drivers/nvmem/Kconfig
++++ b/drivers/nvmem/Kconfig
+@@ -408,10 +408,12 @@ config NVMEM_SG2002_EFUSE
+ 	tristate "Sophgo SG2002 public eFuse shadow support"
+ 	depends on ARCH_SOPHGO || COMPILE_TEST
+ 	depends on HAS_IOMEM
++	select CRYPTO_LIB_SHA512
+ 	help
+ 	  Read the factory UID, public user words and device ID from the
+-	  SG2002 eFuse shadow registers. Other fields are hidden. Fuse
+-	  programming is not supported. The module is called sg2002-efuse.
++	  SG2002 eFuse shadow registers, and derive Sipeed's Ethernet MAC
++	  address from the UID. Other fields are hidden. Fuse programming
++	  is not supported. The module is called sg2002-efuse.
+ 
+ config NVMEM_SUNPLUS_OCOTP
+ 	tristate "Sunplus SoC OTP support"
+diff --git a/drivers/nvmem/sg2002-efuse.c b/drivers/nvmem/sg2002-efuse.c
+index a87ccf75e..69bec44e2 100644
+--- a/drivers/nvmem/sg2002-efuse.c
++++ b/drivers/nvmem/sg2002-efuse.c
+@@ -1,16 +1,21 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* Read-only access to the SG2002's public eFuse shadow words. */
+ 
++#include <crypto/sha2.h>
+ #include <linux/clk.h>
++#include <linux/etherdevice.h>
+ #include <linux/io.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+ #include <linux/nvmem-provider.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
++#include <linux/unaligned.h>
+ 
+ #define SG2002_EFUSE_SHADOW 0x100
+ #define SG2002_EFUSE_SIZE 0x100
++#define SG2002_EFUSE_UID 0x0c
++#define SG2002_EFUSE_UID_SIZE 8
+ 
+ struct sg2002_efuse {
+ 	void __iomem *base;
+@@ -73,6 +78,45 @@ static int sg2002_efuse_read(void *context, unsigned int offset,
+ 	return ret;
+ }
+ 
++/*
++ * Sipeed's firmware derives the Ethernet MAC from the text of the vendor
++ * base_uid attribute: 48:da:35:6f followed by the first two bytes of
++ * SHA-512("UID: %08x_%08x\n"). Match it so a board keeps its address
++ * across vendor and mainline kernels.
++ */
++static int sg2002_efuse_mac_pp(void *context, const char *id, int index,
++			       unsigned int offset, void *data, size_t bytes)
++{
++	static const u8 prefix[] = { 0x48, 0xda, 0x35, 0x6f };
++	char uid[sizeof("UID: 01234567_89abcdef\n")];
++	u8 digest[SHA512_DIGEST_SIZE];
++	u8 *buf = data;
++	int len;
++
++	if (bytes != SG2002_EFUSE_UID_SIZE)
++		return -EINVAL;
++
++	len = scnprintf(uid, sizeof(uid), "UID: %08x_%08x\n",
++			get_unaligned_le32(buf), get_unaligned_le32(buf + 4));
++	sha512((const u8 *)uid, len, digest);
++	memcpy(buf, prefix, sizeof(prefix));
++	memcpy(buf + sizeof(prefix), digest, ETH_ALEN - sizeof(prefix));
++	return 0;
++}
++
++static void sg2002_efuse_fixup_dt_cell_info(struct nvmem_device *nvmem,
++					    struct nvmem_cell_info *cell)
++{
++	if (!of_node_name_eq(cell->np, "mac-address") ||
++	    cell->offset != SG2002_EFUSE_UID ||
++	    cell->bytes != SG2002_EFUSE_UID_SIZE || cell->nbits)
++		return;
++
++	cell->raw_len = SG2002_EFUSE_UID_SIZE;
++	cell->bytes = ETH_ALEN;
++	cell->read_post_process = sg2002_efuse_mac_pp;
++}
++
+ static int sg2002_efuse_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -89,6 +133,7 @@ static int sg2002_efuse_probe(struct platform_device *pdev)
+ 		.root_only = true,
+ 		.reg_read = sg2002_efuse_read,
+ 		.keepout = sg2002_efuse_keepout,
++		.fixup_dt_cell_info = sg2002_efuse_fixup_dt_cell_info,
+ 		.nkeepout = ARRAY_SIZE(sg2002_efuse_keepout),
+ 	};
+ 	struct sg2002_efuse *efuse;

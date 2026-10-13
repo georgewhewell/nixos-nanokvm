@@ -83,10 +83,12 @@ in
           patch -p1 -l < "$tmp"
           rm -f "$tmp"
         done
+        patch -p1 < ${./patches/aic8800-sdio-tcp-pacing-shift.patch}
         # Radxa's 7.1 compat patch only covers the USB tree; carry the
         # equivalent cfg80211/string API updates for the SDIO driver.
         patch -p1 < ${./patches/aic8800-sdio-linux-7.1-cfg80211.patch}
         patch -p1 < ${./patches/aic8800-sdio-vmalloc-include.patch}
+        patch -p1 < ${./patches/aic8800-sdio-rx-from-tx-thread.patch}
       )
     '';
 

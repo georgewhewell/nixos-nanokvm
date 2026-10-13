@@ -271,7 +271,10 @@
 			solomon,prechargep2 = <15>;
 		};
 	};
+};
 
+/* DMA engines must inherit /soc's dma-noncoherent property. */
+&{/soc} {
 	/* The VIP scaler/CSC block ("VPSS") at 0x0a080000, driven as a
 	 * mem2mem device (IMG_IN_V + SC_V1) by the sophgo,sg2002-vpss
 	 * driver.  Vendor DTS numbers the shared interrupt PLIC source 25,
@@ -282,9 +285,6 @@
 	vpss: vpss@a080000 {
 		compatible = "sophgo,sg2002-vpss";
 		reg = <0x0a080000 0x10000>;
-		/* This node lives at the root of this overlay (next to
-		 * csi_capture), not under the SoC bus, so the plic parent
-		 * must be explicit — without it the IRQ lookup fails. */
 		interrupt-parent = <&plic>;
 		interrupts = <SOC_PERIPHERAL_IRQ(9) IRQ_TYPE_LEVEL_HIGH>;
 		clocks = <&clk CLK_SRC_VIP_SYS_0>,

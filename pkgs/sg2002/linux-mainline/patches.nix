@@ -42,6 +42,22 @@ let
 
   patches = [
     (patch {
+      name = "hwrng-sg2002";
+      patch = ./patches/0084-hwrng-add-sg2002-support.patch;
+    })
+    (patch {
+      name = "dt-bindings-iio-adc-sophgo-describe-channel-consumers";
+      patch = ./patches/0082-dt-bindings-iio-adc-sophgo-describe-channel-consumers.patch;
+    })
+    (patch {
+      name = "nvmem-add-sg2002-read-only-public-efuse";
+      patch = ./patches/0083-nvmem-add-SG2002-read-only-public-efuse.patch;
+    })
+    (patch {
+      name = "nvmem-sg2002-efuse-derive-sipeed-mac-address";
+      patch = ./patches/0085-nvmem-sg2002-efuse-derive-Sipeed-MAC-address.patch;
+    })
+    (patch {
       name = "clk-cv18xx-check-pll-lock-status";
       patch = ./patches/0074-clk-cv18xx-check-pll-lock-status.patch;
     })
@@ -92,6 +108,14 @@ let
     (patch {
       name = "dmaengine-dw-axi-dmac-quiet-missing-apb-block";
       patch = ./patches/0079-dmaengine-dw-axi-dmac-don-t-report-a-missing-APB-block-as-an-error.patch;
+    })
+    (patch {
+      name = "dmaengine-dw-axi-dmac-report-programmed-burst";
+      patch = ./patches/0086-dmaengine-dw-axi-dmac-report-the-burst-length-it-programs.patch;
+    })
+    (patch {
+      name = "dmaengine-dw-axi-dmac-queue-whole-sg-entry";
+      patch = ./patches/0087-dmaengine-dw-axi-dmac-queue-the-whole-scatterlist-entry.patch;
     })
     (patch {
       name = "asoc-cv1800b-sound-adc-init-analog-stage";
@@ -337,9 +361,37 @@ let
       name = "media-sophgo-align-vpss-format-enumeration";
       patch = ./patches/0068-media-sophgo-align-VPSS-format-enumeration.patch;
     })
+    (patch {
+      name = "media-sophgo-sg2002-vpss-no-register-access-with-clocks-off";
+      patch = ./patches/0081-media-sophgo-SG2002-VPSS-no-register-access-with-clocks-off.patch;
+    })
   ];
 
   meta = {
+    "hwrng-sg2002" = {
+      origin = "local adaptation of Barebox starfive-vic-rng and Synopsys embARC OSP";
+      upstreamStatus = "draft";
+      dropWhen = "upstream Linux supports the SG2002 DesignWare NIST RNG";
+      notes = "Uses fresh noise seeds, bounded polling and hardware alarm checks. Entropy credit is disabled by board policy pending characterization.";
+    };
+    "dt-bindings-iio-adc-sophgo-describe-channel-consumers" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "The CV1800B SARADC binding and SoC node describe IIO consumers upstream";
+      notes = "The one-cell argument selects the driver's zero-based channel index.";
+    };
+    "nvmem-add-sg2002-read-only-public-efuse" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "SG2002 public eFuse shadow support is available upstream";
+      notes = "Read-only NVMEM access to the UID, public user words and device ID; protected and undocumented ranges are never read.";
+    };
+    "nvmem-sg2002-efuse-derive-sipeed-mac-address" = {
+      origin = "local";
+      upstreamStatus = "local-only";
+      dropWhen = "boards no longer need the MAC address Sipeed's firmware assigns";
+      notes = "Reproduces Sipeed's S10uuid formula so a board keeps its MAC across vendor and mainline kernels.";
+    };
     "clk-cv18xx-check-pll-lock-status" = {
       origin = "local";
       upstreamStatus = "draft";
@@ -412,6 +464,18 @@ let
       upstreamStatus = "draft";
       dropWhen = "Folded into the SG2002 VPSS driver before submission";
       notes = "ENUM_FMT must advertise the same packed/semiplanar source and semiplanar destination formats as S_FMT.";
+    };
+    "media-sophgo-sg2002-vpss-no-register-access-with-clocks-off" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "Folded into the SG2002 VPSS driver before submission";
+      notes = ''
+        Behind Sipeed's U-Boot the VPSS interrupt status reads 0x403 at
+        probe and holds the shared level line high. The handler was
+        requested with the clocks off, ran at once, and its status read
+        hung the bus. Mask and clear with the clocks on before requesting
+        the IRQ; the handler ignores the line while the clocks are off.
+      '';
     };
     "media-sophgo-preserve-vpss-source-colourimetry" = {
       origin = "local";
@@ -556,6 +620,18 @@ let
         Every audio stream start logged "apb_regs not initialized" at
         error level, which the PicoClaw prints over the LCD console.
       '';
+    };
+    "dmaengine-dw-axi-dmac-queue-whole-sg-entry" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "dw_axi_dma_chan_prep_slave_sg queues a scatterlist entry whose length is not a multiple of its segment length";
+      notes = "Without it a 4095-byte spi-dw DMA transfer dereferences an uninitialised descriptor and resets the board.";
+    };
+    "dmaengine-dw-axi-dmac-report-programmed-burst" = {
+      origin = "local";
+      upstreamStatus = "draft";
+      dropWhen = "dw-axi-dmac honours the slave config's maxburst or reports the MSIZE it programs";
+      notes = "Without it spi-dw asks for receive requests at 8 FIFO entries while the DMAC takes 4, and every DMA receive times out.";
     };
     "thermal-cv1800-Add-cv1800-thermal-driver-support" = {
       origin = "linux-pm";

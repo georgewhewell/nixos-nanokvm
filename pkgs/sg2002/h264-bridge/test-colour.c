@@ -37,6 +37,38 @@ static void check_color(const struct v4l2_pix_format *actual,
 	assert(actual->quantization == expected->quantization);
 }
 
+static void check_frame_rate(void)
+{
+	uint64_t next = 0;
+	unsigned int accepted = 0;
+
+	/* A jittery 60 Hz source must still deliver 30 fps on average. */
+	for (unsigned int i = 0; i < 600; i++) {
+		uint64_t now = 1000000000ULL + (uint64_t)i * 1000000000ULL / 60 +
+			(uint64_t)(i % 3) * 200000;
+
+		accepted += (unsigned int)frame_due(now, 1000000000ULL / 30, &next);
+	}
+	assert(accepted == 300);
+
+	/* A slower source passes every frame; a disabled cap does too. */
+	next = 0;
+	for (unsigned int i = 0; i < 240; i++)
+		assert(frame_due((uint64_t)i * 1000000000ULL / 24,
+				 1000000000ULL / 30, &next));
+	for (unsigned int i = 0; i < 1000; i++)
+		assert(frame_due(i, 0, &next));
+
+	/* Long stalls discard missed slots, without accumulating burst credit. */
+	next = 0;
+	assert(frame_due(100, 100, &next));
+	assert(!frame_due(199, 100, &next));
+	assert(frame_due(205, 100, &next));
+	assert(frame_due(1005, 100, &next));
+	assert(!frame_due(1006, 100, &next));
+	assert(frame_due(1100, 100, &next));
+}
+
 int main(void)
 {
 	const struct v4l2_pix_format colors[] = {
@@ -84,6 +116,7 @@ int main(void)
 	assert(report_live_frames(300, 300) == -1 && errno == ECANCELED);
 	assert(!report_live_frames(300, 301));
 	assert(!report_live_frames(0, 0));
+	check_frame_rate();
 	puts("bridge colour format helpers: full601/linear, limited709, defaults OK");
 	return 0;
 }

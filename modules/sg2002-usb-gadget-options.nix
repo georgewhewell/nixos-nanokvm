@@ -17,7 +17,7 @@
     serial = lib.mkOption {
       type = lib.types.str;
       default = "sg2002-0001";
-      description = "USB gadget iSerialNumber string.";
+      description = "USB gadget iSerialNumber string when the eFuse UID cell is unavailable; otherwise the UID in hex is used.";
     };
     console.enable = lib.mkOption {
       type = lib.types.bool;

@@ -19,7 +19,6 @@
   lib,
   stdenv,
   linux_7_2,
-  audio ? false,
   bluetooth ? false,
   # Temperature injection is a diagnostic control, independent of profiling.
   thermalEmulation ? false,
@@ -42,20 +41,6 @@
       # Test the thermal cooling map without physically overheating a board.
       # Normal images do not expose the temperature-emulation interface.
       THERMAL_EMULATION = lib.kernel.yes;
-    }
-    // lib.optionalAttrs audio {
-      # The common Nano carrier DT already describes the internal RXADC on
-      # I2S0 and TXDAC on I2S3 as the sg2002-onboard simple card.  Keep the
-      # complete, lab-proven minimum built in: a diskless initrd must not
-      # depend on broad ALSA codec module discovery.
-      SOUND = lib.kernel.yes;
-      SND = lib.kernel.yes;
-      SND_PCM = lib.kernel.yes;
-      SND_SOC = lib.kernel.yes;
-      SND_SIMPLE_CARD = lib.kernel.yes;
-      SND_SOC_CV1800B_TDM = lib.kernel.yes;
-      SND_SOC_CV1800B_ADC_CODEC = lib.kernel.yes;
-      SND_SOC_CV1800B_DAC_CODEC = lib.kernel.yes;
     }
     // lib.optionalAttrs bluetooth {
     # AIC8800 FDRV provides HCI_SDIO itself; the kernel needs only the

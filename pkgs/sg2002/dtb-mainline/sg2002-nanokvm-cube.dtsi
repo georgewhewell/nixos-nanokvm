@@ -1,0 +1,21 @@
+/* NanoKVM cube (Lite/Full, "beta" carrier) on top of the PCIe carrier DT.
+ *
+ * The beta carrier shares the PCIe pad map; only the front-panel SSD1306
+ * differs, strapped to 0x3d instead of 0x3c. Panel properties must stay
+ * in step with oled@3c in sg2002-nanokvm-pcie.dtsi. */
+&oled_i2c {
+	/delete-node/ oled@3c;
+
+	oled@3d {
+		compatible = "solomon,ssd1306fb-i2c";
+		reg = <0x3d>;
+		reset-gpios = <&porta 22 GPIO_ACTIVE_LOW>;
+		solomon,width = <128>;
+		solomon,height = <64>;
+		solomon,page-offset = <0>;
+		solomon,col-offset = <0>;
+		solomon,com-invdir;
+		solomon,prechargep1 = <1>;
+		solomon,prechargep2 = <15>;
+	};
+};

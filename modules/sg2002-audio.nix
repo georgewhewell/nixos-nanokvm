@@ -108,7 +108,7 @@
   });
 in {
   options.sg2002.audio = {
-    enable = lib.mkEnableOption "the SG2002 onboard RXADC/TXDAC ALSA simple-card";
+    enable = lib.mkEnableOption "ALSA tools for the SG2002 onboard RXADC/TXDAC card (the mainline kernel always includes it)";
 
     pipewire.enable = lib.mkEnableOption "a minimal system-wide PipeWire and WirePlumber audio service";
 
