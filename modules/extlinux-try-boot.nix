@@ -49,6 +49,7 @@
       booted-label
       set-default <label>
       arm <candidate-label> [fallback-label]
+      auto-arm
       early-rollback
       is-candidate
       bless
@@ -256,6 +257,21 @@
       log "armed $candidate with fallback $fallback"
     }
 
+    cmd_auto_arm() {
+      local booted default default_init booted_init_path
+      [ -e "$cmdline" ] && [ -e "$conf" ] || return 0
+      booted="$(booted_label 2>/dev/null || true)"
+      default="$(current_default 2>/dev/null || true)"
+      [ -n "$booted" ] && [ -n "$default" ] || return 0
+      default_init="$(label_init "$default" 2>/dev/null || true)"
+      booted_init_path="$(booted_init 2>/dev/null || true)"
+      [ -n "$default_init" ] && [ -n "$booted_init_path" ] || return 0
+      # Default and numbered labels can name the same system. Re-arming
+      # during its boot would replace the real fallback with that alias.
+      [ "$default_init" != "$booted_init_path" ] || return 0
+      cmd_arm "$default" "$booted"
+    }
+
     cmd_early_rollback() {
       local booted booted_init_path
       [ -s "$state" ] || exit 0
@@ -335,6 +351,7 @@
         set_default "$1"
         ;;
       arm) cmd_arm "$@" ;;
+      auto-arm) cmd_auto_arm "$@" ;;
       early-rollback) cmd_early_rollback "$@" ;;
       is-candidate) cmd_is_candidate "$@" ;;
       bless) cmd_bless "$@" ;;
@@ -391,13 +408,7 @@ in {
     system.build.extlinuxTryBoot = tryBoot;
 
     system.activationScripts.extlinuxTryBootAutoArm = lib.mkIf cfg.autoArmOnSwitch (lib.stringAfter ["specialfs"] ''
-      if [ -e /proc/cmdline ] && [ -e ${lib.escapeShellArg cfg.configPath} ]; then
-        booted="$(${tryBoot}/bin/extlinux-try-boot booted-label 2>/dev/null || true)"
-        default="$(${tryBoot}/bin/extlinux-try-boot current-default 2>/dev/null || true)"
-        if [ -n "$booted" ] && [ -n "$default" ] && [ "$default" != "$booted" ]; then
-          ${tryBoot}/bin/extlinux-try-boot arm "$default" "$booted"
-        fi
-      fi
+      ${tryBoot}/bin/extlinux-try-boot auto-arm
     '');
 
     systemd.services.extlinux-try-boot-rollback = {

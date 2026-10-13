@@ -148,8 +148,10 @@ pkgs.testers.runNixOSTest {
 
     with subtest("mixed-menu trial boots roll back and bless without requiring an initrd"):
         running("${withInitrd}")
-        machine.succeed(f"{mixed_cli} arm nixos-9002-default nixos-9001-default")
+        machine.succeed(f"{mixed_cli} set-default nixos-9002-default; {mixed_cli} auto-arm")
+        machine.succeed("grep -Fx 'fallback=nixos-9001-default' /run/mixed-state; cp /run/mixed-state /run/armed-state")
         running("${withoutInitrd}")
+        machine.succeed(f"{mixed_cli} auto-arm; cmp /run/armed-state /run/mixed-state")
         machine.succeed(f"cp {conf} /run/mixed-menu-saved")
         machine.succeed(f"sed -i 's/^LABEL nixos-9002-default$/LABEL missing-candidate/' {conf}")
         machine.fail(f"{mixed_cli} is-candidate")
@@ -162,6 +164,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"grep -Fx 'DEFAULT nixos-9001-default' {conf}")
         machine.succeed(f"{mixed_cli} bless")
         machine.succeed(f"grep -Fx 'DEFAULT nixos-9002-default' {conf}; test ! -e /run/mixed-state")
+        machine.succeed(f"{mixed_cli} auto-arm; test ! -e /run/mixed-state")
 
     with subtest("an older installer removes no-initrd entries and try-boot refuses the missing fallback"):
         write_menu("${oldBuilder}", "${withInitrd}")
@@ -175,6 +178,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"test -s {bootdir}/extlinux/{no_initrd_kernel}")
         machine.succeed(f"{mixed_cli} arm nixos-9001-default nixos-9002-default")
         running("${withInitrd}")
+        machine.succeed(f"{mixed_cli} auto-arm; grep -Fx 'fallback=nixos-9002-default' /run/mixed-state")
         machine.succeed(f"{mixed_cli} early-rollback")
         machine.succeed(f"grep -Fx 'DEFAULT nixos-9002-default' {conf}")
         machine.succeed(f"{mixed_cli} bless")
