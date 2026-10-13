@@ -42,6 +42,10 @@ let
 
   patches = [
     (patch {
+      name = "net-stmmac-honor-rx-allocation-flags";
+      patch = ./patches/0088-net-stmmac-honor-rx-allocation-flags.patch;
+    })
+    (patch {
       name = "hwrng-sg2002";
       patch = ./patches/0084-hwrng-add-sg2002-support.patch;
     })
@@ -368,6 +372,12 @@ let
   ];
 
   meta = {
+    "net-stmmac-honor-rx-allocation-flags" = {
+      origin = "netdev/20260627122533.1165324-1-dinghui1111@163.com (allocation hunk)";
+      upstreamStatus = "posted";
+      dropWhen = "stmmac_init_rx_buffers honors its caller's GFP flags";
+      notes = "Allows initial Ethernet RX buffers to reclaim page cache on the 256 MiB SG2002; runtime refill remains atomic.";
+    };
     "hwrng-sg2002" = {
       origin = "local adaptation of Barebox starfive-vic-rng and Synopsys embARC OSP";
       upstreamStatus = "draft";
