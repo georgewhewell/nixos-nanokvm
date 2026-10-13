@@ -1,0 +1,25 @@
+Subject: [PATCH] net: stmmac: honor the RX buffer allocation flags
+
+stmmac_setup_dma_desc() passes GFP_KERNEL while bringing the interface
+up, but stmmac_init_rx_buffers() discards it and uses GFP_ATOMIC. On the
+256 MiB SG2002 this fails with ENOMEM while over 90 MiB is reclaimable
+page cache. Reclaiming that cache manually makes the same open succeed.
+
+Honor the caller's flags, retaining the existing GFP_DMA32 constraint.
+The receive refill path continues to use its own atomic allocation.
+
+This is the allocation-flags hunk from Ding Hui's posted v4 resume fix,
+without the unrelated suspend/resume changes:
+https://lore.kernel.org/netdev/20260627122533.1165324-1-dinghui1111@163.com/
+
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -1643,7 +1643,7 @@ static int stmmac_init_rx_buffers(struct stmmac_priv *priv,
+ {
+ 	struct stmmac_rx_queue *rx_q = &dma_conf->rx_queue[queue];
+ 	struct stmmac_rx_buffer *buf = &rx_q->buf_pool[i];
+-	gfp_t gfp = (GFP_ATOMIC | __GFP_NOWARN);
++	gfp_t gfp = flags;
+ 
+ 	if (priv->dma_cap.host_dma_width <= 32)
+ 		gfp |= GFP_DMA32;
