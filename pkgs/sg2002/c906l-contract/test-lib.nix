@@ -28,7 +28,7 @@ assert timer5.sha256 == "334c0f3443c5842035f510eb5054eb18684219c9d6598a35379f8c2
 assert timer6.sha256 == "9c719ef5d827bf6e3b000f60830c376b750a4d3498ec40908516fa7195302fd0";
 assert timer7.sha256 == "740ea5301db69ae204c72eafb03035c6e58725523c4b3be2feb3864ced89064a";
 assert allTimers.sha256 == "a733712d2aa85baff6f7f2083311ffc483319fafd55fc027b1b146615ec391b1";
-assert lcd.sha256 == "3e5de4f393d18b9ec03f0ffb173bb863547c1d0d93cdcf0905f8a60a9b1fe9b2";
+assert lcd.sha256 == "53470c33b715731019865a658dd8a7affdb69a80b414a5195428f2fb16dab355";
 assert lcd.expectedCapabilities == 139;
 assert lcd.dormantCapabilities == 11;
 assert lcd.leaseMask == 16;

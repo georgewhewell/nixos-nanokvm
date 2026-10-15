@@ -267,10 +267,12 @@ int main(void)
 	assert(wait_slot(&fb, 0, 20, true, POLL_US) == -ESTALE);
 	status->generation = 7; status->flags = 1;
 	assert(wait_slot(&fb, 0, 20, true, POLL_US) == -EIO);
-	/* A full frame's wire time, and the cap that keeps the estimate sane. */
+	/* Full and partial frames use the supported 11.71875 MHz panel clock.
+	 * The prediction must cover the whole transfer, not cap it at 32 ms. */
 	assert(wire_time_us(SG2002_C906L_PICOCLAW_LCD_WIDTH *
-			    SG2002_C906L_PICOCLAW_LCD_HEIGHT) == 19660);
-	assert(wire_time_us(0) == POLL_US && wire_time_us(~0u) == POLL_MAX_US * 16);
+			    SG2002_C906L_PICOCLAW_LCD_HEIGHT) == 78643);
+	assert(wire_time_us(240 * 16) == 5242);
+	assert(wire_time_us(0) == POLL_US && wire_time_us(~0u) == WIRE_TIME_MAX_US);
 
 	reset(); fb.lock.locked = true;
 	assert(lock_until(&fb, 10, true) == -EAGAIN && jiffies == 0);

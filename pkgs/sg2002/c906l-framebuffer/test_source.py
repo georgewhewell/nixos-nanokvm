@@ -37,7 +37,7 @@ def macro(source: str, name: str) -> str:
 
 def main() -> None:
     source = Path(sys.argv[1]).read_text()
-    macros = ("POLL_US", "POLL_MAX_US")
+    macros = ("POLL_US", "POLL_MAX_US", "WIRE_TIME_MAX_US")
     functions = (
         "manifest_valid",
         "slot_record",

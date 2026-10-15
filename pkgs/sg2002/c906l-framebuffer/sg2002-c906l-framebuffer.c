@@ -172,6 +172,8 @@ static int check_generation(struct lcd_frames *fb)
 /* Shortest useful poll interval, and the cap it backs off to. */
 #define POLL_US 250u
 #define POLL_MAX_US 2000u
+/* A full frame needs 78.64 ms at the panel's supported SPI clock. */
+#define WIRE_TIME_MAX_US 100000u
 
 /* Bit time on the panel bus is exact and dominates every transfer, so the
  * completion poll can sleep through almost all of it instead of waking on the
@@ -182,7 +184,7 @@ static unsigned int wire_time_us(u32 pixels)
 	u64 us = div_u64((u64)pixels * 16 * USEC_PER_SEC,
 			 LCD(SPI_CLOCK_HZ) / LCD(SPI_DIVIDER));
 
-	return clamp_t(u64, us, POLL_US, POLL_MAX_US * 16);
+	return clamp_t(u64, us, POLL_US, WIRE_TIME_MAX_US);
 }
 
 static int wait_slot(struct lcd_frames *fb, unsigned int slot,

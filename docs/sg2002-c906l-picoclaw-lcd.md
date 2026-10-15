@@ -33,14 +33,24 @@ does not establish tear-free presentation or a physical vertical-blank event.
 The nominal DRM mode must not be interpreted as a guaranteed refresh rate.
 
 Frame data leaves the C906L as one transmit-only 16-bit SPI stream per frame
-at 187.5 MHz / 4 = 46.875 MHz (Sipeed's released image drives the same panel at
-45 MHz). Measured on a PicoClaw from the SD image, timing only the commit,
-over three runs of 40 commits each: `sg2002-c906l-drm-test /dev/dri/card0 41`
-takes 23.263 to 23.498 ms per acknowledged full frame under the default
-schedutil governor and 22.925 to 22.966 ms under performance, of which 19.66 ms
-is SPI wire time. A console-sized update, `sg2002-c906l-drm-test /dev/dri/card0
-41 240x16`, takes 1.717 to 1.745 ms under either governor. Byte-sized control
-transactions keep the preloaded-FIFO path.
+at 187.5 MHz / 16 = 11.71875 MHz. The
+[ST7789V v1.3 datasheet, section 7.4.3](https://newhavendisplay.com/content/datasheets/ST7789V.pdf)
+requires a write clock period of at least 66 ns, with high and low phases of
+at least 15 ns. This divider gives an 85.33 ns period and 42.67 ns phases.
+The previous divider of 4 violated these limits and produced intermittent
+green and pink regions on the physical panel despite successful completions
+and correct pixels in shared DDR. Sipeed's 45 MHz application setting was not
+evidence that our transfer path was reliable at that speed.
+
+Full-frame wire time is now 78.64 ms. The driver's initial completion wait
+covers this transfer before falling back to short polls; its previous 32 ms
+prediction cap would wake needlessly during a full frame at the corrected
+clock. On the USB-booted PicoClaw, 1,000
+acknowledged full-frame commits averaged 87.199 ms; 2,000 partial updates with
+varying sizes and origins averaged 22.443 ms. These measurements include
+Linux copy and handoff overhead and are not display refresh rates. Damage
+tracking is retained, and byte-sized control transactions keep the
+preloaded-FIFO path.
 
 The standalone USB initrd uses this same DRM fbdev layer for a best-effort
 kernel console. `console=tty0` records boot text in the foreground virtual
@@ -61,8 +71,11 @@ profile ID 17, and final capabilities `0x8b`. Its immutable digest covers the
 physical resources, panel geometry, pin preconditions and framebuffer protocol.
 It also covers the firmware-mediated Wi-Fi power protocol. The combined
 configuration has digest
+`53470c33b715731019865a658dd8a7affdb69a80b414a5195428f2fb16dab355`.
+The clock correction changes the digest from the previous
 `3e5de4f393d18b9ec03f0ffb173bb863547c1d0d93cdcf0905f8a60a9b1fe9b2`;
-older LCD-only firmware deliberately fails this identity check.
+firmware, DT and Linux modules must therefore be rebuilt together. The
+framebuffer wire protocol remains version 3.
 
 Framebuffer protocol version 3 changed the slot pixel format from big-endian
 RGB565 to `DRM_FORMAT_RGB565` (little-endian): Linux now copies pixels without
@@ -181,6 +194,45 @@ On the board, verify `sg2002-c906l-ctl check` before display testing. The
 allocates two standard RGB565 dumb buffers, draws changing checkerboards,
 waits for page-flip events, prints how long each commit took, holds the final
 pattern briefly, and restores the previous display mode. It refuses unrelated graphics devices.
+
+For the physical colour-integrity regression, stop the display application
+and run both commands below, then restore the application:
+
+```console
+sg2002-c906l-drm-test /dev/dri/card0 1000 --integrity
+sg2002-c906l-drm-test /dev/dri/card0 1000 240x240 --integrity
+```
+
+The expected image is a stationary dark-blue checkerboard with a white
+border. With `--integrity`, the rectangle argument supplies maximum dimensions;
+successive partial updates exercise changing origins, odd widths and packed
+rows. Green or pink patches are failures even when every commit succeeds.
+Inspect the physical panel with a camera: a framebuffer PNG cannot detect
+corruption after the shared-memory handoff.
+
+## Colour-integrity validation: 2026-10-15
+
+At divider 4, a run of 1,000 partial commits reproduced large green and pink
+patches in the dark-blue checkerboard. At divider 16, the same test and a
+further 1,000 full-frame plus 2,000 partial commits completed without those
+artifacts. There were no green or pink outliers in the fixed central screen
+region of 290 webcam samples across the longer run; the failing reference
+contained thousands. This is sampled physical evidence, not a claim that each
+transmitted pixel was measured. Display and Wi-Fi transport faults stayed zero.
+
+To test without rebooting this RAM-only board, a one-shot lab helper held DRM
+master, selected `KD_GRAPHICS`, and required unchanged acknowledged slot
+counters plus a disabled, deselected, empty SPI controller for 100 ms. It then
+changed only BAUDR from 4 to 16 and verified the readback before resuming
+display work. This was a controlled exception to normal exclusive peripheral
+ownership, not a production runtime control interface. The helper is not part
+of the shipped firmware or application. The boot ID and watchdog process did
+not change; the live firmware still reports its original contract digest.
+
+The persistent correction is in the generated contract and rebuilt firmware.
+The new matched boot bundle has not been cold-boot tested in this session;
+deploy the complete bundle on the next normal boot rather than mixing old
+Linux modules with new firmware.
 
 Host tests cover the exact contract, invalid ownership records, frame bounds,
 cacheline layout, panel command sequencing, bounded SPI work, terminal errors,

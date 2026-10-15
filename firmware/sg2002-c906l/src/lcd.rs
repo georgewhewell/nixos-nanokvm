@@ -510,7 +510,7 @@ impl<I: Io> Engine<I> {
                             let remaining =
                                 u32::from(render.width) * u32::from(render.height) - render.pixel;
                             if let Pixels::Frame(slot) = render.source {
-                                // One burst per frame (~20 ms at 47 MHz) must
+                                // One burst per frame (~79 ms at 11.719 MHz) must
                                 // stay well inside the heartbeat period.
                                 self.io.dc(true)?;
                                 self.io.frame_stream(slot, render.pixel, remaining)?;

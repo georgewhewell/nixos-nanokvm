@@ -499,6 +499,20 @@ class ContractGenerationTests(unittest.TestCase):
                 self.assertIn(f"HAVE_{stem} = True", python)
                 self.assertIn(f'"{name}"', dts)
 
+    def test_lcd_spi_clock_meets_panel_write_timing(self) -> None:
+        constants = self.profiles["picoclaw-lcd"][2]["peripheralLeases"][
+            "picoclawLcd"
+        ]["constants"]
+        clock, divider = constants["spiClockHz"], constants["spiDivider"]
+        self.assertGreater(clock, 0)
+        self.assertGreaterEqual(divider, 2)
+        self.assertEqual(divider % 2, 0)
+        # ST7789V v1.3, section 7.4.3: write period >= 66 ns;
+        # SCL high and low >= 15 ns. Use integer products, without rounding
+        # a too-fast clock down to an apparently acceptable frequency.
+        self.assertGreaterEqual(divider * 1_000_000_000, clock * 66)
+        self.assertGreaterEqual(divider * 1_000_000_000, clock * 2 * 15)
+
     def test_lcd_layout_and_generated_bindings(self) -> None:
         path, digest, contract, _semantic = self.profiles["picoclaw-lcd"]
         lcd = contract["peripheralLeases"]["picoclawLcd"]
@@ -623,6 +637,7 @@ class ContractGenerationTests(unittest.TestCase):
         mutations = [
             lambda lcd: lcd["constants"].update(frameSlot0Address=0x8FF00000),
             lambda lcd: lcd["constants"].update(spiAddress=0x04180000),
+            lambda lcd: lcd["constants"].update(spiDivider=4),
             lambda lcd: lcd["constants"].update(dcPin=29),
             lambda lcd: lcd["constants"].update(wifiPowerPin=27),
             lambda lcd: lcd["constants"].update(wifiPowerOwnershipAddress=0x8FF50080),

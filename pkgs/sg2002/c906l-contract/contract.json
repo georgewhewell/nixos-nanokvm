@@ -421,7 +421,7 @@
         "gpioAddress": 50462720,
         "gpioSize": 4096,
         "spiClockHz": 187500000,
-        "spiDivider": 4,
+        "spiDivider": 16,
         "dcPin": 28,
         "resetPin": 27,
         "wifiPowerPin": 26,

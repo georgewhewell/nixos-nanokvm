@@ -21,6 +21,7 @@ struct buffer {
     uint8_t *pixels;
 };
 static volatile sig_atomic_t stopping;
+static bool integrity_pattern;
 static void stop(int signal) { (void)signal; stopping = 1; }
 
 static int make_buffer(int fd, struct buffer *b)
@@ -56,6 +57,11 @@ static void draw(struct buffer *b, unsigned frame)
         uint16_t *row = (uint16_t *)(b->pixels + y * b->pitch);
         for (unsigned x = 0; x < 240; x++) {
             uint16_t colour = ((x / 20 + y / 20 + frame) & 1) ? 0 : colours[(x / 40 + frame) % 6];
+            /* Keep this image constant across commits: any green/pink patch
+             * is corruption. These mixed-bit colours exposed SPI errors that
+             * saturated primary-colour patterns did not reliably reveal. */
+            if (integrity_pattern)
+                colour = ((x / 24 + y / 24) & 1) ? 0x0865 : 0x10ea;
             if (x < 3 || y < 3 || x >= 237 || y >= 237) colour = 0xffff;
             row[x] = colour;
         }
@@ -96,6 +102,10 @@ static int wait_flip(int fd, bool *done)
 
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !strcmp(argv[argc - 1], "--integrity")) {
+        integrity_pattern = true;
+        argc--;
+    }
     struct sigaction action = { .sa_handler = stop };
     sigemptyset(&action.sa_mask);
     if (sigaction(SIGINT, &action, NULL) || sigaction(SIGTERM, &action, NULL)) return 1;
@@ -103,7 +113,7 @@ int main(int argc, char **argv)
     unsigned count = 4;
     unsigned damage_width = 0, damage_height = 0;
     if (argc > 4) {
-        fprintf(stderr, "usage: %s [DRM_DEVICE [FRAMES [WxH]]]\n", argv[0]);
+        fprintf(stderr, "usage: %s [DRM_DEVICE [FRAMES [WxH]]] [--integrity]\n", argv[0]);
         return 2;
     }
     if (argc >= 3) {
@@ -170,6 +180,14 @@ int main(int argc, char **argv)
         if (damage_width) {
             drmModeClip clip = { .x1 = 0, .y1 = 0,
                                  .x2 = damage_width, .y2 = damage_height };
+            if (integrity_pattern) {
+                /* Exercise packed rows, nonzero origins and odd widths. */
+                unsigned w = 1 + (frame * 37) % damage_width;
+                unsigned h = 1 + (frame * 71) % damage_height;
+                unsigned x = (frame * 13) % (241 - w);
+                unsigned y = (frame * 19) % (241 - h);
+                clip = (drmModeClip){ .x1 = x, .y1 = y, .x2 = x + w, .y2 = y + h };
+            }
             draw(&buffers[0], frame);
             if (clock_gettime(CLOCK_MONOTONIC, &start) ||
                 drmModeDirtyFB(fd, buffers[0].fb, &clip, 1) ||
