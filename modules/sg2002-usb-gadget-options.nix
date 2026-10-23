@@ -26,6 +26,21 @@
     };
   };
 
+  options.sg2002.usbGadget.hid.enable = lib.mkOption {
+    type = lib.types.bool;
+    default = false;
+    description = ''
+      Add the three HID functions the NanoKVM server writes to:
+      /dev/hidg0 keyboard, /dev/hidg1 relative mouse and /dev/hidg2
+      absolute pointer. Report descriptors match Sipeed's firmware, so the
+      server's reports need no translation.
+
+      The controller cannot serve these next to both network and serial
+      functions, so the ACM function is dropped and
+      `sg2002.usbGadget.console.enable` must be false.
+    '';
+  };
+
   options.sg2002.usbGadget.network = {
     enable = lib.mkOption {
       type = lib.types.bool;
