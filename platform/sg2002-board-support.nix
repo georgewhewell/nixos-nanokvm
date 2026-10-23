@@ -14,6 +14,10 @@
   ...
 }: let
   cfg = config.sg2002;
+  udevTriggerDevices = [
+    ""
+    "-udevadm trigger --type=devices --action=add --prioritized-subsystem=block,tpmrm,net,tty,input"
+  ];
 
   kernelPkg =
     if cfg.kernel == "mainline" && cfg.bluetooth.enable
@@ -302,6 +306,14 @@ in {
       networking.useNetworkd = true;
       networking.useDHCP = false;
       networking.firewall.enable = false;
+    }
+
+    {
+      # Coldplug devices only. Replaying add events for every bus, driver
+      # and module costs about 6 s of this single core in each of the two
+      # passes, and the stock rules use none of them here.
+      systemd.services.systemd-udev-trigger.serviceConfig.ExecStart = udevTriggerDevices;
+      boot.initrd.systemd.services.systemd-udev-trigger.serviceConfig.ExecStart = udevTriggerDevices;
     }
 
     (lib.mkIf cfg.initrd.pruneKernelModules {
