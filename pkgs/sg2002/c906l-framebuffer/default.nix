@@ -33,6 +33,14 @@ stdenv.mkDerivation {
       "$out/lib/modules/${kernel.modDirVersion}/kernel/drivers/misc/sg2002-c906l-framebuffer.ko"
     runHook postInstall
   '';
+
+  # nixpkgs merges external-module certificates into modules.cer. Generate
+  # the signatures after fixup so stripping cannot invalidate them.
+  postFixup = lib.optionalString (buildPackages ? kmodigest) ''
+    while IFS= read -r -d "" module; do
+      ${lib.getExe buildPackages.kmodigest} "$module"
+    done < <(find "$out/lib/modules" -type f -name '*.ko' -print0)
+  '';
   passthru.contractPackage = contract;
   passthru.tests.ownership = buildPackages.runCommand "sg2002-c906l-framebuffer-ownership-tests"
     {
