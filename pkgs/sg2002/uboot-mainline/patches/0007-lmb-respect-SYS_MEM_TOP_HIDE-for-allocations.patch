@@ -16,21 +16,19 @@ the rest of U-Boot.
 
 Signed-off-by: NixOS NanoKVM <nanokvm@localhost>
 ---
- lib/Kconfig | 2 +-
- 1 file changed, 1 insertion(+), 1 deletion(-)
+ lib/Kconfig | 1 +
+ 1 file changed, 1 insertion(+)
 
 diff --git a/lib/Kconfig b/lib/Kconfig
-index 2e85c1d25a..2ba025e6bd 100644
 --- a/lib/Kconfig
 +++ b/lib/Kconfig
-@@ -1298,7 +1298,7 @@ config LMB_ARCH_MEM_MAP
+@@ -1314,6 +1314,7 @@
  config LMB_LIMIT_DMA_BELOW_RAM_TOP
  	bool
  	depends on LMB
--	default y if ARCH_BCM283X || ARCH_ROCKCHIP
-+	default y if ARCH_BCM283X || ARCH_ROCKCHIP || SYS_MEM_TOP_HIDE != 0x0
++	default y if SYS_MEM_TOP_HIDE != 0x0
+ 	default y if ARCH_BCM283X || ARCH_ROCKCHIP || STARFIVE_JH7110
  	help
  	  Some architectures can not DMA above ram_top boundary,
- 	  which is after 4 GiB or 32-bit boundary too. Limit the
 -- 
 2.51.0
