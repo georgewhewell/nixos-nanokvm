@@ -42,6 +42,9 @@ also includes the C906L Rust firmware, DRM/`/dev/fb0` display path and
 C906L-mediated Wi-Fi power control. Carrier wiring determines which devices
 are usable; build checks do not substitute for live peripheral tests.
 
+The [SG2002 TPU runtime and demo](docs/sg2002-tpu.md) execute CV181x
+TIU/TDMA commands through a privileged mainline driver.
+
 See [the standalone guide](docs/usb-initrd.md) for Wi-Fi credentials, Linux
 and Docker upload instructions, ROM reset, USB SSH discovery and diagnostics.
 Native Windows/macOS upload is not yet supported; a Linux VM needs explicit

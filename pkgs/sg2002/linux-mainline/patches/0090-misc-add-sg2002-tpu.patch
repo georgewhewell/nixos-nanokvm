@@ -1,0 +1,752 @@
+From: George Whewell <george@whewell.io>
+Subject: [PATCH] misc: add privileged SG2002 TPU command submission
+
+Use the DMA API and current clock/reset frameworks for CV181x TIU and
+TDMA jobs. Command descriptors can address the whole bus, so this is a
+CAP_SYS_RAWIO interface, not an unprivileged accelerator sandbox.
+
+Register sequencing reference: sophgo/osdrv sg200x-dev,
+interdrv/tpu/hal/cv181x, Copyright Cvitek 2019-2021.
+
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -651,4 +651,12 @@
+ source "drivers/misc/keba/Kconfig"
+ source "drivers/misc/amd-sbi/Kconfig"
+ source "drivers/misc/rp1/Kconfig"
++config SG2002_TPU
++	tristate "Sophgo SG2002 TPU"
++	depends on ARCH_SOPHGO || COMPILE_TEST
++	depends on OF && HAS_DMA
++	help
++	  Privileged TIU/TDMA command submission and coherent DMA allocation
++	  for the SG2002 TPU. The device has no IOMMU and requires CAP_SYS_RAWIO.
++
+ endmenu
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -74,3 +74,4 @@
+ obj-y				+= keba/
+ obj-y				+= amd-sbi/
+ obj-$(CONFIG_MISC_RP1)		+= rp1/
++obj-$(CONFIG_SG2002_TPU)		+= sg2002-tpu.o
+--- /dev/null
++++ b/drivers/misc/sg2002-tpu.c
+@@ -0,0 +1,583 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * SG2002/CV181x Tensor Processing Unit.
++ * Register sequencing follows Sophgo osdrv interdrv/tpu/hal/cv181x,
++ * Copyright (C) Cvitek Co., Ltd. 2019-2021.
++ *
++ * The command ISA includes unrestricted bus addresses. Framing checks do
++ * not sandbox it: every operation requires initial-namespace CAP_SYS_RAWIO.
++ */
++#include <linux/capability.h>
++#include <linux/clk.h>
++#include <linux/completion.h>
++#include <linux/delay.h>
++#include <linux/dma-mapping.h>
++#include <linux/interrupt.h>
++#include <linux/iopoll.h>
++#include <linux/kref.h>
++#include <linux/miscdevice.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/reset.h>
++#include <linux/reboot.h>
++#include <linux/slab.h>
++#include <linux/uaccess.h>
++#include <linux/xarray.h>
++#include <uapi/linux/sg2002_tpu.h>
++
++#define TPU_MAX_COMMANDS U16_MAX
++#define TPU_MAX_MEMORY SZ_32M
++#define TDMA_CTRL 0x00
++#define TDMA_DES_BASE 0x04
++#define TDMA_INT 0x08
++#define TDMA_SYNC 0x0c
++#define TDMA_ARRAYBASE 0x70
++#define TDMA_STATUS 0xec
++#define TIU_CTRL 0x100
++
++struct tpu_buffer {
++	void *cpu;
++	dma_addr_t dma;
++	u32 size;
++};
++
++struct sg2002_tpu {
++	struct device *dev;
++	struct miscdevice misc;
++	struct mutex lock;
++	struct kref ref;
++	struct clk_bulk_data clocks[2];
++	struct reset_control_bulk_data resets[3];
++	void __iomem *tdma;
++	void __iomem *tiu;
++	struct completion done;
++	u32 irq_status;
++	unsigned long allocated;
++	int irq;
++	unsigned int users;
++	bool removed;
++	bool wedged;
++};
++
++struct tpu_file {
++	struct sg2002_tpu *tpu;
++	struct xarray buffers;
++};
++
++static void tpu_release_device(struct kref *ref)
++{
++	struct sg2002_tpu *t = container_of(ref, struct sg2002_tpu, ref);
++
++	put_device(t->dev);
++	kfree(t);
++}
++
++static int tpu_reset(struct sg2002_tpu *t)
++{
++	int ret;
++
++	ret = reset_control_bulk_assert(ARRAY_SIZE(t->resets), t->resets);
++	if (ret)
++		return ret;
++	usleep_range(10, 20);
++	return reset_control_bulk_deassert(ARRAY_SIZE(t->resets), t->resets);
++}
++
++/* The reset register documentation does not promise to drain outstanding
++ * AXI transfers. An unsuccessful job therefore requires a system reset;
++ * never recycle its command or tensor memory, even after an IP reset.
++ */
++static void tpu_poison(struct sg2002_tpu *t)
++{
++	t->wedged = true;
++	__module_get(THIS_MODULE);
++	reset_control_bulk_assert(ARRAY_SIZE(t->resets), t->resets);
++	synchronize_irq(t->irq);
++	dev_err(t->dev, "job failed; DMA memory and clocks retained until board reset\n");
++}
++
++static void tpu_reset_board(void)
++{
++	emergency_restart();
++	panic("SG2002 TPU requires a hardware reset before memory can be reused");
++}
++
++static irqreturn_t tpu_irq(int irq, void *data)
++{
++	struct sg2002_tpu *t = data;
++	u32 raw = readl(t->tdma + TDMA_INT) >> 16;
++	u32 status = raw & ~BIT(5);
++
++	if (!raw)
++		return IRQ_NONE;
++	/* Matrix/general descriptors leave unused dimensions or strides zero.
++	 * Sophgo masks that diagnostic (bit 5). Acknowledge even an isolated
++	 * masked diagnostic without treating it as job completion.
++	 */
++	writel(0xffff0000 | BIT(5), t->tdma + TDMA_INT);
++	if (status) {
++		WRITE_ONCE(t->irq_status, status);
++		complete(&t->done);
++	}
++	return IRQ_HANDLED;
++}
++
++static void tpu_free_buffer(struct sg2002_tpu *t, struct tpu_buffer *b)
++{
++	if (!t->wedged) {
++		dma_free_coherent(t->dev, b->size, b->cpu, b->dma);
++		t->allocated -= b->size;
++	}
++	kfree(b);
++}
++
++static int tpu_power_on(struct sg2002_tpu *t)
++{
++	int ret = clk_bulk_prepare_enable(ARRAY_SIZE(t->clocks), t->clocks);
++
++	if (ret)
++		return ret;
++	ret = tpu_reset(t);
++	if (ret) {
++		clk_bulk_disable_unprepare(ARRAY_SIZE(t->clocks), t->clocks);
++		return ret;
++	}
++	writel(0xffffffff, t->tdma + TDMA_INT);
++	enable_irq(t->irq);
++	return 0;
++}
++
++static void tpu_power_off(struct sg2002_tpu *t)
++{
++	disable_irq(t->irq);
++	reset_control_bulk_assert(ARRAY_SIZE(t->resets), t->resets);
++	clk_bulk_disable_unprepare(ARRAY_SIZE(t->clocks), t->clocks);
++}
++
++static int tpu_open(struct inode *inode, struct file *file)
++{
++	struct sg2002_tpu *t = container_of(file->private_data,
++					  struct sg2002_tpu, misc);
++	struct tpu_file *f;
++	int ret;
++
++	if (!capable(CAP_SYS_RAWIO))
++		return -EPERM;
++	f = kzalloc(sizeof(*f), GFP_KERNEL);
++	if (!f)
++		return -ENOMEM;
++	mutex_lock(&t->lock);
++	if (t->removed || t->wedged) {
++		mutex_unlock(&t->lock);
++		kfree(f);
++		return -ENODEV;
++	}
++	if (!t->users) {
++		ret = tpu_power_on(t);
++		if (ret) {
++			mutex_unlock(&t->lock);
++			kfree(f);
++			return ret;
++		}
++	}
++	t->users++;
++	kref_get(&t->ref);
++	mutex_unlock(&t->lock);
++	f->tpu = t;
++	xa_init_flags(&f->buffers, XA_FLAGS_ALLOC1);
++	file->private_data = f;
++	return 0;
++}
++
++static int tpu_release(struct inode *inode, struct file *file)
++{
++	struct tpu_file *f = file->private_data;
++	struct sg2002_tpu *t = f->tpu;
++	struct tpu_buffer *b;
++	unsigned long index;
++
++	mutex_lock(&t->lock);
++	xa_for_each(&f->buffers, index, b)
++		tpu_free_buffer(t, b);
++	xa_destroy(&f->buffers);
++	if (!--t->users && !t->wedged && !t->removed)
++		tpu_power_off(t);
++	mutex_unlock(&t->lock);
++	kref_put(&t->ref, tpu_release_device);
++	kfree(f);
++	return 0;
++}
++
++static int tpu_alloc(struct tpu_file *f, void __user *arg)
++{
++	struct sg2002_tpu_buffer req;
++	struct sg2002_tpu *t = f->tpu;
++	struct tpu_buffer *b;
++	int ret;
++
++	if (copy_from_user(&req, arg, sizeof(req)))
++		return -EFAULT;
++	if (!req.size || req.size > TPU_MAX_MEMORY || req.handle || req.dma_address)
++		return -EINVAL;
++	req.size = PAGE_ALIGN(req.size);
++	if (req.size > TPU_MAX_MEMORY - t->allocated)
++		return -ENOMEM;
++	b = kzalloc(sizeof(*b), GFP_KERNEL);
++	if (!b)
++		return -ENOMEM;
++	b->size = req.size;
++	b->cpu = dma_alloc_coherent(t->dev, b->size, &b->dma, GFP_KERNEL);
++	if (!b->cpu) {
++		kfree(b);
++		return -ENOMEM;
++	}
++	t->allocated += b->size;
++	ret = xa_alloc(&f->buffers, &req.handle, b, XA_LIMIT(1, 65535), GFP_KERNEL);
++	if (ret)
++		goto free;
++	req.dma_address = b->dma;
++	if (!copy_to_user(arg, &req, sizeof(req)))
++		return 0;
++	xa_erase(&f->buffers, req.handle);
++	ret = -EFAULT;
++free:
++	tpu_free_buffer(t, b);
++	return ret;
++}
++
++static int tpu_transfer(struct tpu_file *f, void __user *arg, bool write)
++{
++	struct sg2002_tpu_transfer req;
++	struct tpu_buffer *b;
++
++	if (copy_from_user(&req, arg, sizeof(req)))
++		return -EFAULT;
++	if (req.reserved)
++		return -EINVAL;
++	b = xa_load(&f->buffers, req.handle);
++	if (!b)
++		return -ENOENT;
++	if (req.offset > b->size || req.size > b->size - req.offset)
++		return -EINVAL;
++	if (write)
++		return copy_from_user(b->cpu + req.offset, u64_to_user_ptr(req.data),
++				      req.size) ? -EFAULT : 0;
++	return copy_to_user(u64_to_user_ptr(req.data), b->cpu + req.offset,
++			    req.size) ? -EFAULT : 0;
++}
++
++static int tpu_submit(struct tpu_file *f, const struct sg2002_tpu_submit *req)
++{
++	struct sg2002_tpu *t = f->tpu;
++	struct tpu_buffer *b;
++	void *commands;
++	dma_addr_t dma;
++	size_t tdma_offset, size;
++	u32 value, bases[8], timeout;
++	int i, ret;
++	long waited;
++
++	if (req->reserved || req->timeout_ms > 10000 ||
++	    req->tiu_count > TPU_MAX_COMMANDS || req->tdma_count > TPU_MAX_COMMANDS ||
++	    (!req->tiu_count && !req->tdma_count))
++		return -EINVAL;
++	for (i = 0; i < ARRAY_SIZE(bases); i++) {
++		bases[i] = 0;
++		if (!req->base_handles[i])
++			continue;
++		b = xa_load(&f->buffers, req->base_handles[i]);
++		if (!b)
++			return -ENOENT;
++		bases[i] = b->dma;
++	}
++	timeout = req->timeout_ms ?: 2000;
++	/* TIU prefetch reads 128 bytes beyond the last 112-byte descriptor. */
++	tdma_offset = ALIGN(req->tiu_count * SG2002_TPU_TIU_BYTES + 128, 256);
++	size = tdma_offset + req->tdma_count * SG2002_TPU_TDMA_BYTES;
++	commands = dma_alloc_coherent(t->dev, size, &dma, GFP_KERNEL);
++	if (!commands)
++		return -ENOMEM;
++	if (copy_from_user(commands, u64_to_user_ptr(req->tiu),
++			   req->tiu_count * SG2002_TPU_TIU_BYTES) ||
++	    copy_from_user(commands + tdma_offset, u64_to_user_ptr(req->tdma),
++			   req->tdma_count * SG2002_TPU_TDMA_BYTES)) {
++		ret = -EFAULT;
++		goto free;
++	}
++	/* Reset synchronization IDs and pending completion before publishing. */
++	value = readl(t->tiu + TIU_CTRL + 12);
++	writel(value | BIT(0), t->tiu + TIU_CTRL + 12);
++	writel(value & ~BIT(0), t->tiu + TIU_CTRL + 12);
++	writel(3 << 22 | BIT(1), t->tiu + TIU_CTRL);
++	writel(BIT(2), t->tdma + TDMA_CTRL);
++	writel(0, t->tdma + TDMA_CTRL);
++	writel(0xffff0000, t->tdma + TDMA_INT);
++	synchronize_irq(t->irq);
++	reinit_completion(&t->done);
++	WRITE_ONCE(t->irq_status, 0);
++	for (i = 0; i < ARRAY_SIZE(bases); i++)
++		writel(bases[i], t->tdma + TDMA_ARRAYBASE + 4 * i);
++	writel(0, t->tdma + 0x90);
++	writel(0, t->tdma + 0x94);
++	dma_wmb();
++	if (req->tiu_count) {
++		writel(lower_32_bits(dma), t->tiu + TIU_CTRL + 4);
++		writel(0, t->tiu + TIU_CTRL + 8);
++		writel(BIT(11), t->tiu + TIU_CTRL + 12);
++		writel(3 << 22 | BIT(30) | BIT(31) | BIT(0), t->tiu + TIU_CTRL);
++	}
++	if (req->tdma_count) {
++		writel((dma + tdma_offset) >> 6, t->tdma + TDMA_DES_BASE);
++		writel(0, t->tdma + 0xa0);
++		writel(0, t->tdma + 0xa4);
++		writel(BIT(5), t->tdma + TDMA_INT);
++		writel(req->tdma_count << 16 | BIT(13) | BIT(10) | 3 << 8 |
++		       BIT(5) | BIT(1) | BIT(0), t->tdma + TDMA_CTRL);
++		waited = wait_for_completion_timeout(&t->done,
++							msecs_to_jiffies(timeout));
++		ret = waited ? 0 : -ETIMEDOUT;
++		if (ret)
++			goto recover;
++		if (READ_ONCE(t->irq_status) != 1 ||
++		    (readl(t->tdma + TDMA_SYNC) >> 16) < req->tdma_count) {
++			ret = -EIO;
++			goto recover;
++		}
++	}
++	ret = 0;
++	if (req->tiu_count)
++		ret = readl_poll_timeout(t->tiu + TIU_CTRL, value,
++			(value & BIT(1)) && ((value >> 6) & 0xffff) >= req->tiu_count,
++			50, timeout * 1000);
++	if (ret)
++		goto recover;
++	dma_rmb();
++	goto free;
++recover:
++	dev_warn(t->dev, "job failed: %d (TDMA %#x, TIU %#x)\n", ret,
++		 readl(t->tdma + TDMA_SYNC), readl(t->tiu + TIU_CTRL));
++	tpu_poison(t);
++free:
++	if (!t->wedged)
++		dma_free_coherent(t->dev, size, commands, dma);
++	return ret;
++}
++
++/* The device mutex spans every segment, preserving local SRAM dependencies. */
++static int tpu_batch(struct tpu_file *f, void __user *arg)
++{
++	struct sg2002_tpu_batch req;
++	struct sg2002_tpu_submit *jobs;
++	unsigned int i;
++	int ret = 0;
++
++	if (copy_from_user(&req, arg, sizeof(req)))
++		return -EFAULT;
++	if (req.reserved || !req.count || req.count > SG2002_TPU_MAX_BATCH)
++		return -EINVAL;
++	jobs = memdup_user(u64_to_user_ptr(req.jobs), req.count * sizeof(*jobs));
++	if (IS_ERR(jobs))
++		return PTR_ERR(jobs);
++	for (i = 0; i < req.count; i++) {
++		ret = tpu_submit(f, &jobs[i]);
++		if (ret)
++			break;
++	}
++	kfree(jobs);
++	return ret;
++}
++
++static long tpu_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
++{
++	struct tpu_file *f = file->private_data;
++	struct sg2002_tpu *t = f->tpu;
++	void __user *up = (void __user *)arg;
++	struct sg2002_tpu_buffer req;
++	struct sg2002_tpu_submit job;
++	struct sg2002_tpu_info info = {
++		.abi_version = SG2002_TPU_ABI_VERSION,
++		.max_commands = TPU_MAX_COMMANDS,
++	};
++	struct tpu_buffer *b;
++	int ret;
++
++	if (!capable(CAP_SYS_RAWIO))
++		return -EPERM;
++	if (mutex_lock_interruptible(&t->lock))
++		return -ERESTARTSYS;
++	if (t->removed || t->wedged) {
++		ret = -ENODEV;
++		goto unlock;
++	}
++	switch (cmd) {
++	case SG2002_TPU_INFO:
++		info.clock_hz = clk_get_rate(t->clocks[0].clk);
++		ret = copy_to_user(up, &info, sizeof(info)) ? -EFAULT : 0;
++		break;
++	case SG2002_TPU_ALLOC:
++		ret = tpu_alloc(f, up);
++		break;
++	case SG2002_TPU_FREE:
++		ret = -EFAULT;
++		if (copy_from_user(&req, up, sizeof(req)))
++			break;
++		ret = -EINVAL;
++		if (req.size || req.dma_address)
++			break;
++		b = xa_erase(&f->buffers, req.handle);
++		ret = b ? 0 : -ENOENT;
++		if (b)
++			tpu_free_buffer(t, b);
++		break;
++	case SG2002_TPU_READ:
++	case SG2002_TPU_WRITE:
++		ret = tpu_transfer(f, up, cmd == SG2002_TPU_WRITE);
++		break;
++	case SG2002_TPU_SUBMIT:
++		ret = copy_from_user(&job, up, sizeof(job)) ? -EFAULT :
++			tpu_submit(f, &job);
++		break;
++	case SG2002_TPU_BATCH:
++		ret = tpu_batch(f, up);
++		break;
++	default:
++		ret = -ENOTTY;
++	}
++unlock:
++	mutex_unlock(&t->lock);
++	return ret;
++}
++
++static const struct file_operations tpu_fops = {
++	.owner = THIS_MODULE,
++	.open = tpu_open,
++	.release = tpu_release,
++	.unlocked_ioctl = tpu_ioctl,
++	.compat_ioctl = compat_ptr_ioctl,
++};
++
++static int tpu_probe(struct platform_device *pdev)
++{
++	struct sg2002_tpu *t;
++	int ret;
++
++	t = kzalloc(sizeof(*t), GFP_KERNEL);
++	if (!t)
++		return -ENOMEM;
++	t->dev = get_device(&pdev->dev);
++	kref_init(&t->ref);
++	mutex_init(&t->lock);
++	init_completion(&t->done);
++	t->clocks[0].id = "axi";
++	t->clocks[1].id = "fabric";
++	t->resets[0].id = "tdma";
++	t->resets[1].id = "tiu";
++	t->resets[2].id = "system";
++	t->tdma = devm_platform_ioremap_resource_byname(pdev, "tdma");
++	if (IS_ERR(t->tdma)) {
++		ret = PTR_ERR(t->tdma);
++		goto put;
++	}
++	t->tiu = devm_platform_ioremap_resource_byname(pdev, "tiu");
++	if (IS_ERR(t->tiu)) {
++		ret = PTR_ERR(t->tiu);
++		goto put;
++	}
++	ret = dma_set_mask_and_coherent(t->dev, DMA_BIT_MASK(32));
++	if (ret)
++		goto put;
++	ret = devm_clk_bulk_get(t->dev, ARRAY_SIZE(t->clocks), t->clocks);
++	if (ret)
++		goto put;
++	ret = devm_reset_control_bulk_get_exclusive(t->dev, ARRAY_SIZE(t->resets), t->resets);
++	if (ret)
++		goto put;
++	ret = clk_bulk_prepare_enable(ARRAY_SIZE(t->clocks), t->clocks);
++	if (ret)
++		goto put;
++	ret = tpu_reset(t);
++	if (ret)
++		goto clocks;
++	writel(0xffffffff, t->tdma + TDMA_INT);
++	t->irq = platform_get_irq(pdev, 0);
++	if (t->irq < 0) {
++		ret = t->irq;
++		goto clocks;
++	}
++	ret = devm_request_irq(t->dev, t->irq, tpu_irq, 0, dev_name(t->dev), t);
++	if (ret)
++		goto clocks;
++	tpu_power_off(t);
++	t->misc = (struct miscdevice) {
++		.minor = MISC_DYNAMIC_MINOR,
++		.name = "sg2002-tpu",
++		.fops = &tpu_fops,
++		.parent = t->dev,
++		.mode = 0600,
++	};
++	ret = misc_register(&t->misc);
++	if (ret) {
++		devm_free_irq(t->dev, t->irq, t);
++		goto put;
++	}
++	platform_set_drvdata(pdev, t);
++	dev_info(t->dev, "CV181x TPU, %lu Hz; privileged command submission\n",
++		 clk_get_rate(t->clocks[0].clk));
++	return 0;
++clocks:
++	reset_control_bulk_assert(ARRAY_SIZE(t->resets), t->resets);
++	clk_bulk_disable_unprepare(ARRAY_SIZE(t->clocks), t->clocks);
++put:
++	kref_put(&t->ref, tpu_release_device);
++	return dev_err_probe(&pdev->dev, ret, "TPU initialization failed\n");
++}
++
++static void tpu_remove(struct platform_device *pdev)
++{
++	struct sg2002_tpu *t = platform_get_drvdata(pdev);
++
++	misc_deregister(&t->misc);
++	mutex_lock(&t->lock);
++	t->removed = true;
++	if (t->wedged)
++		tpu_reset_board();
++	if (t->users)
++		tpu_power_off(t);
++	devm_free_irq(t->dev, t->irq, t);
++	mutex_unlock(&t->lock);
++	kref_put(&t->ref, tpu_release_device);
++}
++
++static void tpu_shutdown(struct platform_device *pdev)
++{
++	struct sg2002_tpu *t = platform_get_drvdata(pdev);
++
++	mutex_lock(&t->lock);
++	t->removed = true;
++	if (t->wedged)
++		tpu_reset_board();
++	reset_control_bulk_assert(ARRAY_SIZE(t->resets), t->resets);
++	mutex_unlock(&t->lock);
++}
++
++static const struct of_device_id tpu_match[] = {
++	{ .compatible = "sophgo,sg2002-tpu" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, tpu_match);
++
++static struct platform_driver tpu_driver = {
++	.probe = tpu_probe,
++	.remove = tpu_remove,
++	.shutdown = tpu_shutdown,
++	.driver = {
++		.name = "sg2002-tpu",
++		.of_match_table = tpu_match,
++		.suppress_bind_attrs = true,
++	},
++};
++module_platform_driver(tpu_driver);
++MODULE_DESCRIPTION("Sophgo SG2002 TPU command driver");
++MODULE_LICENSE("GPL");
+--- /dev/null
++++ b/include/uapi/linux/sg2002_tpu.h
+@@ -0,0 +1,60 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++#ifndef _UAPI_SG2002_TPU_H
++#define _UAPI_SG2002_TPU_H
++#include <linux/ioctl.h>
++#include <linux/types.h>
++
++#define SG2002_TPU_ABI_VERSION 1
++#define SG2002_TPU_TIU_BYTES 112
++#define SG2002_TPU_TDMA_BYTES 64
++#define SG2002_TPU_MAX_BATCH 64
++
++struct sg2002_tpu_info {
++	__u32 abi_version;
++	__u32 max_commands;
++	__u64 clock_hz;
++};
++
++/* Allocation is owned by the open file; closing it releases all buffers. */
++struct sg2002_tpu_buffer {
++	__u32 handle;
++	__u32 size;
++	__u64 dma_address;
++};
++
++struct sg2002_tpu_transfer {
++	__u32 handle;
++	__u32 offset;
++	__u32 size;
++	__u32 reserved;
++	__u64 data;
++};
++
++/* Raw hardware descriptors, already reordered for descriptor mode. */
++struct sg2002_tpu_submit {
++	__u64 tiu;
++	__u64 tdma;
++	__u32 tiu_count;
++	__u32 tdma_count;
++	__u32 base_handles[8]; /* 0 means base address zero */
++	__u32 timeout_ms;      /* 1..10000; 0 selects 2000 */
++	__u32 reserved;
++};
++
++/* Execute segments without another client's job between them. Stop at the
++ * first failure; already completed segments are not rolled back.
++ */
++struct sg2002_tpu_batch {
++	__u64 jobs; /* array of struct sg2002_tpu_submit */
++	__u32 count;
++	__u32 reserved;
++};
++
++#define SG2002_TPU_INFO _IOR('T', 0x00, struct sg2002_tpu_info)
++#define SG2002_TPU_ALLOC _IOWR('T', 0x01, struct sg2002_tpu_buffer)
++#define SG2002_TPU_FREE _IOW('T', 0x02, struct sg2002_tpu_buffer)
++#define SG2002_TPU_WRITE _IOW('T', 0x03, struct sg2002_tpu_transfer)
++#define SG2002_TPU_READ _IOW('T', 0x04, struct sg2002_tpu_transfer)
++#define SG2002_TPU_SUBMIT _IOW('T', 0x05, struct sg2002_tpu_submit)
++#define SG2002_TPU_BATCH _IOW('T', 0x06, struct sg2002_tpu_batch)
++#endif
+--- /dev/null
++++ b/Documentation/devicetree/bindings/misc/sophgo,sg2002-tpu.yaml
+@@ -0,0 +1,68 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/misc/sophgo,sg2002-tpu.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Sophgo SG2002 Tensor Processing Unit
++
++maintainers:
++  - George Whewell <george@whewell.io>
++
++description: |
++  The CV181x TPU combines an eight-lane tensor instruction unit (TIU) and
++  a tensor DMA engine (TDMA). Both use descriptor lists in system memory.
++
++properties:
++  compatible:
++    const: sophgo,sg2002-tpu
++  reg:
++    items:
++      - description: TDMA registers
++      - description: TIU registers
++  reg-names:
++    items:
++      - const: tdma
++      - const: tiu
++  interrupts:
++    maxItems: 1
++  clocks:
++    maxItems: 2
++  clock-names:
++    items:
++      - const: axi
++      - const: fabric
++  resets:
++    maxItems: 3
++  reset-names:
++    items:
++      - const: tdma
++      - const: tiu
++      - const: system
++
++required:
++  - compatible
++  - reg
++  - reg-names
++  - interrupts
++  - clocks
++  - clock-names
++  - resets
++  - reset-names
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/clock/sophgo,cv1800.h>
++    #include <dt-bindings/interrupt-controller/irq.h>
++    tpu@c100000 {
++        compatible = "sophgo,sg2002-tpu";
++        reg = <0x0c100000 0x1000>, <0x0c101000 0x1000>;
++        reg-names = "tdma", "tiu";
++        interrupts = <76 IRQ_TYPE_LEVEL_HIGH>;
++        clocks = <&clk CLK_TPU>, <&clk CLK_TPU_FAB>;
++        clock-names = "axi", "fabric";
++        resets = <&rst 7>, <&rst 8>, <&rst 9>;
++        reset-names = "tdma", "tiu", "system";
++    };
