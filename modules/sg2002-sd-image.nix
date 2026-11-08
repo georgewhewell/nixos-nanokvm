@@ -10,6 +10,7 @@
   pkgs,
   ...
 }: let
+  cfg = config.sg2002.sdImage;
   firmwareLabel = "FIRMWARE";
   rootLabel = "NIXOS_SD";
   imageName = "${config.networking.hostName}-sg2002-sd";
@@ -36,18 +37,10 @@
   diskDevice = config.disko.devices.disk.sg2002-sd.device;
   firmwarePart = partitionDevice diskDevice 1;
   rootPart = partitionDevice diskDevice 2;
-  upstreamExtlinuxBuilder = import (pkgs.path + "/nixos/modules/system/boot/loader/generic-extlinux-compatible/extlinux-conf-builder.nix") {
-    inherit lib pkgs;
-  };
   # The generic builder's plain `cp` may use Btrfs copy_file_range and retain
   # a Nix-store file's shared, fragmented extent map. U-Boot's Btrfs reader is
   # much less exercised than Linux's; make boot payloads independent copies.
-  targetExtlinuxBuilder = pkgs.runCommand "sg2002-extlinux-conf-builder" {} ''
-    cp ${upstreamExtlinuxBuilder} "$out"
-    substituteInPlace "$out" \
-      --replace-fail 'cp -r $src $dstTmp' 'cp --reflink=never -r $src $dstTmp'
-    chmod +x "$out"
-  '';
+  targetExtlinuxBuilder = import ../lib/extlinux-conf-builder.nix { inherit lib pkgs; };
   targetExtlinuxBuilderArgs =
     "-g ${toString config.boot.loader.generic-extlinux-compatible.configurationLimit} "
     + "-t ${if config.boot.loader.timeout == null then "-1" else toString config.boot.loader.timeout}"
@@ -150,7 +143,55 @@
     echo "${pkgs.stdenv.hostPlatform.system}" > "$out/nix-support/system"
   '';
 in {
-  config = {
+  options.sg2002.sdImage.initrd.enable = lib.mkOption {
+    type = lib.types.bool;
+    default = true;
+    description = ''
+      Whether SD images boot through an initrd. Without one the kernel
+      mounts the Btrfs root itself and stage 2 starts directly, which saves
+      the initrd unpack, a second udev coldplug and switch-root on the single
+      SG2002 core. Everything the image needs before the root is mounted
+      must then be built into the kernel, and services that the initrd
+      started (USB gadget, watchdog keeper) start in stage 2 instead.
+    '';
+  };
+
+  config = lib.mkMerge [
+  (lib.mkIf (!cfg.initrd.enable) {
+    boot.initrd.enable = false;
+    # There is no initrd gadget to keep; stage 2 creates it.
+    sg2002.usbGadget.stage2.preserveInitrd = false;
+    # systemd-growfs resolves the root device through /dev/block, which
+    # only udev populates; without an initrd it runs first and fails.
+    # Resize through the mount point instead, off the path to local-fs.
+    fileSystems."/".autoResize = lib.mkForce false;
+    systemd.services.sg2002-grow-root = {
+      description = "Grow the root file system to its partition";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "growpart.service" ];
+      requires = lib.optional config.boot.growPartition "growpart.service";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${pkgs.btrfs-progs}/bin/btrfs filesystem resize max /";
+      };
+    };
+    # systemd-modules-load runs before tmpfiles creates this link on a
+    # freshly written card, and aic8800 opens its blobs by literal path.
+    system.activationScripts.sg2002LibFirmware =
+      lib.mkIf config.sg2002.wifi.enable ''
+        mkdir -p /lib
+        ln -sfn /run/current-system/firmware /lib/firmware
+      '';
+  })
+  {
+    # With no stage 1 the kernel mounts / directly, before udev has made
+    # /dev/disk/by-label. growpart resolves that label to find the parent
+    # disk: wait for that specific device, not an unrelated global settle.
+    systemd.services.growpart = lib.mkIf config.boot.growPartition {
+      after = [ "dev-disk-by\\x2dlabel-NIXOS_SD.device" ];
+      requires = [ "dev-disk-by\\x2dlabel-NIXOS_SD.device" ];
+      serviceConfig.ExecCondition = [ rootPartitionNeedsGrowth ];
+    };
     # The SG2002 does not need nixpkgs' generic SD-card initrd module set.
     sg2002.initrd.pruneKernelModules = true;
     # The board-support module force-prunes the generic initrd module set, so
@@ -175,7 +216,11 @@ in {
         "btrfs"
       ];
       kernelParams = [
-        "root=/dev/disk/by-label/${rootLabel}"
+        # The kernel cannot resolve a filesystem label on its own. The SD
+        # slot is always mmc0.
+        (if cfg.initrd.enable
+         then "root=/dev/disk/by-label/${rootLabel}"
+         else "root=/dev/mmcblk0p2")
         "rootwait"
         "rw"
         "rootfstype=btrfs"
@@ -191,10 +236,6 @@ in {
         # console with driver debug output (AIC8800 "get tx power").
       ];
     };
-
-    systemd.services.growpart.serviceConfig.ExecCondition = [
-      rootPartitionNeedsGrowth
-    ];
 
     disko = {
       # The legacy `table` backend preserves the vendor-compatible MBR
@@ -292,5 +333,6 @@ in {
       sdImageScript = config.system.build.diskoImagesScript;
     };
     system.boot.loader.id = lib.mkForce "sg2002-extlinux";
-  };
+  }
+  ];
 }
