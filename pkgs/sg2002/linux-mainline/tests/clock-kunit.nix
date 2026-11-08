@@ -1,6 +1,6 @@
-{ lib, stdenv, linux_7_2, python3, bc, bison, flex, perl, openssl, elfutils, qemu, jq }:
+{ lib, stdenv, linux_7_3, python3, bc, bison, flex, perl, openssl, elfutils, qemu, jq }:
 let
-  source = import ../source.nix { inherit linux_7_2; };
+  source = import ../source.nix { inherit linux_7_3; };
   clockPatches = builtins.filter
     (patch: lib.hasPrefix "clk-cv18xx-" patch.name)
     (import ../patches.nix).patches;

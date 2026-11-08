@@ -16,7 +16,7 @@
     # radxa-pkg/aic8800: modern-kernel-compatible rewrite of the
     # vendor AIC8800 driver.
     aic8800-radxa = {
-      url = "github:radxa-pkg/aic8800/bd11969265809a0fc948f1107c8256bbb2c1aa60";
+      url = "github:radxa-pkg/aic8800/eae57ef2297ce7b897549173ea787f01f35631df";
       flake = false;
     };
 

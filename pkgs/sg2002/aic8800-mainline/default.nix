@@ -40,6 +40,8 @@
     "fix-linux-6.17-build.patch"
     "fix-linux-6.19-build.patch"
     "fix-linux-7.1-build.patch"
+    "fix-linux-7.2-build.patch"
+    "fix-linux-7.3-build.patch"
     "fix-map-riscv64-subarch.patch"
     "fix-vmalloc-not-include.patch"
     "fix-build-on-low-memory-devices.patch"
@@ -84,9 +86,8 @@ in
           rm -f "$tmp"
         done
         patch -p1 < ${./patches/aic8800-sdio-tcp-pacing-shift.patch}
-        # Radxa's 7.1 compat patch only covers the USB tree; carry the
-        # equivalent cfg80211/string API updates for the SDIO driver.
-        patch -p1 < ${./patches/aic8800-sdio-linux-7.1-cfg80211.patch}
+        # The cfg80211/tdls and string API updates for the SDIO tree
+        # all landed upstream in the fix-linux-7.x series.
         patch -p1 < ${./patches/aic8800-sdio-vmalloc-include.patch}
         patch -p1 < ${./patches/aic8800-sdio-rx-from-tx-thread.patch}
       )
@@ -123,6 +124,9 @@ in
         path=$(find . -name "$ko.ko" -print -quit)
         [ -n "$path" ] || { echo "ERROR: $ko.ko not found" >&2; exit 1; }
         install -m 644 "$path" "$D/"
+        # New nixpkgs depmod merges per-module certificates into
+        # modules.cer; emit one for these out-of-tree modules too.
+        ${buildPackages.kmodigest}/bin/kmodigest "$D/$ko.ko"
       done
       runHook postInstall
     '';

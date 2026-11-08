@@ -83,7 +83,8 @@ in {
       '';
     };
     systemd = {
-      enable = true;
+      # Scripted initrd was removed upstream; the initrd is always
+      # systemd-based now, so there is no enable flag to set here.
       # Keep the RAM appliance's networking, diagnostics, console and
       # sandboxing without pulling in stage-2 managers and their libraries.
       package = lib.mkDefault (pkgs.systemdMinimal.override {

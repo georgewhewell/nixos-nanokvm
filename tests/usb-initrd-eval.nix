@@ -17,7 +17,8 @@ let
     # builds copy the runner source and do not exercise this package factory.
     assert builtins.isString uploader.drvPath;
     assert (uploader.c906lContract != null) == config.sg2002.auxCore.enable;
-    assert stage1.systemd.enable;
+    # The initrd is always systemd-based now (scripted initrd removed
+    # upstream), so there is no enable flag to assert.
     assert config.nixpkgs.hostPlatform.gcc.tune == "thead-c906";
     assert stage1.systemd.root == null;
     assert stage1.network.ssh.enable;

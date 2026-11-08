@@ -18,7 +18,7 @@
 {
   lib,
   stdenv,
-  linux_7_2,
+  linux_7_3,
   bluetooth ? false,
   # Temperature injection is a diagnostic control, independent of profiling.
   thermalEmulation ? false,
@@ -29,12 +29,12 @@
 # Standard nixpkgs riscv64 kernel: buildLinux installs the uncompressed
 # `Image` (kernelFile default) into $out on its own — no compress/install
 # dance needed. We only layer on the SG2002 patch queue + config delta.
-(linux_7_2.override {
+(linux_7_3.override {
   defconfig = "defconfig";
   enableCommonConfig = false;
   autoModules = false;
   argsOverride = {
-    extraMeta.branch = "7.2";
+    extraMeta.branch = "7.3";
   };
   structuredExtraConfig = (import ./config.nix {inherit lib;})
     // lib.optionalAttrs thermalEmulation {

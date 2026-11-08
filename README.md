@@ -82,6 +82,8 @@ Timer4–7 firmware. Camera/ISP blocks remain Linux-owned, not C906L firmware.
 See [C906L architecture and hardware evidence](docs/sg2002-c906l.md) and
 [mainline ISP support](docs/sg2002-mainline-isp.md). Commands in historical
 network-root bring-up reports describe an older development workflow.
+The [datasheet audit](docs/sg2002-datasheet-audit.md) records electrical
+constraints, the DRAM-aware thermal trip, and remaining driver opportunities.
 
 The separate `qemu-c906-virt` app runs a full development VM with the shared
 kernel and a 256 MiB C906 model. QEMU has no SG2002 peripheral model: it cannot
@@ -125,8 +127,8 @@ For application patches, update `patches/nanokvm/`; kernel and bootloader
 patches live under `pkgs/sg2002/`. Keep reusable hardware fixes here and
 machine-specific policy in the consuming flake.
 
-The mainline kernel follows nixpkgs' 7.2 series rather than a tarball
-pinned in this repo, so stable 7.2.x updates arrive with a flake lock bump
+The mainline kernel follows nixpkgs' 7.3 series rather than a tarball
+pinned in this repo, so stable 7.3.x updates arrive with a flake lock bump
 instead of a hand-edited hash. `pkgs/sg2002/linux-mainline/source.nix` is
 the single place the kernel package, the DTB build and the clock KUnit
 suite agree on that version.

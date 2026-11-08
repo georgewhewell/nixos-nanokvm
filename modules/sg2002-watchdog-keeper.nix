@@ -138,10 +138,10 @@ in
           assertion = !cfg.stage2.enable || cfg.initrd.enable;
           message = "sg2002.watchdogKeeper.stage2.enable requires initrd.enable";
         }
-        {
-          assertion = !cfg.initrd.enable || config.boot.initrd.systemd.enable;
-          message = "sg2002.watchdogKeeper.initrd.enable requires a systemd initrd";
-        }
+        # Scripted initrd was removed upstream; the initrd is always
+        # systemd-based now, so the former
+        # `boot.initrd.systemd.enable` precondition held unconditionally
+        # and its assertion is gone.
       ];
     }
 

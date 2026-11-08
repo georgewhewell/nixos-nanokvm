@@ -320,7 +320,8 @@
 / {
 	/* Generic IIO→hwmon bridge. The upstream driver hard-codes a
 	 * 3300/4096 mV scale without reading reference selection/trim.
-	 * These nominal values are not calibrated board measurements. */
+	 * These nominal values are not calibrated board measurements;
+	 * see docs/sg2002-datasheet-audit.md before using them as such. */
 	saradc_hwmon: iio-hwmon {
 		compatible = "iio-hwmon";
 		io-channels = <&saradc 0>, <&saradc 1>, <&saradc 2>;
@@ -445,7 +446,8 @@
 	 * referencing the sensor; without this it returns -ENODEV.
 	 * SG2002 Preliminary Datasheet v1.0-alpha, section 2.5.2 note 3
 	 * (p. 27) and section 2.5.5 (p. 32), limits packaged DRAM to
-	 * 115 °C. Request reboot at 105 °C to leave nominal margin;
+	 * 115 °C; the 125 °C destructive silicon limit is not an operating
+	 * limit. Request reboot at 105 °C to leave 10 °C nominal margin;
 	 * this firmware has no working power-off handler. The
 	 * 1 s polling delay is borrowed from vendor; the cv1800
 	 * driver also fires the zone via threshold IRQ when trips

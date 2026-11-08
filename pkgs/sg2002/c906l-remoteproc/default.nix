@@ -44,6 +44,10 @@ stdenv.mkDerivation {
     runHook preInstall
     install -Dm0644 sg2002-c906l-remoteproc.ko \
       "$out/lib/modules/${kernel.modDirVersion}/kernel/drivers/remoteproc/sg2002-c906l-remoteproc.ko"
+    # New nixpkgs depmod merges per-module certificates into
+    # modules.cer; emit one for this out-of-tree module too.
+    ${buildPackages.kmodigest}/bin/kmodigest \
+      "$out/lib/modules/${kernel.modDirVersion}/kernel/drivers/remoteproc/sg2002-c906l-remoteproc.ko"
     runHook postInstall
   '';
 
