@@ -76,7 +76,7 @@
 		video_pool: video-pool@86800000 {
 			compatible = "shared-dma-pool";
 			no-map;
-			reg = <0x86800000 0x2800000>;
+			reg = <0x86800000 0x2000000>;
 		};
 	};
 
@@ -87,59 +87,11 @@
 	 * (gpio4/porte under /soc, with the same PLIC interrupt, whose
 	 * parent is inherited from the soc node), so only the ddr_top
 	 * syscon is added here — redefining gpio4 duplicates the label. */
-	ddr_top: syscon@800a000 {
-		compatible = "sophgo,sg2002-ddr-top", "syscon";
-		reg = <0x0800a000 0x1000>;
-	};
 };
 
 /* All three DMA engines inherit /soc's dma-noncoherent property. */
+/* BISECT: coda980+vpss nodes stripped (July-working boot had neither) */
 &{/soc} {
-	/* The generic SoC node is disabled, and the standalone DTB builder
-	 * consumes an unpatched kernel source. Keep the complete enabled node
-	 * here, sharing the deterministic media pool with CSI capture. */
-	video-codec@b030000 {
-		compatible = "sophgo,sg2002-coda980";
-		reg = <0x0b030000 0x100>, <0x0b010000 0x10000>;
-		reg-names = "vc-ctrl", "h264";
-		interrupt-parent = <&plic>;
-		interrupts = <SOC_PERIPHERAL_IRQ(5) IRQ_TYPE_LEVEL_HIGH>;
-		interrupt-names = "h264";
-		clocks = <&clk CLK_AXI_VIDEO_CODEC>,
-			 <&clk CLK_CFG_REG_VC>,
-			 <&clk CLK_VC_SRC0>,
-			 <&clk CLK_H264C>,
-			 <&clk CLK_APB_H264C>;
-		clock-names = "axi-video-codec", "cfg-reg-vc", "vc-src0",
-			      "h264c", "apb-h264c";
-		resets = <&rst RST_H264C>;
-		firmware-name = "sophgo/sg2002/coda980.bin";
-		memory-region = <&video_pool>;
-		status = "okay";
-	};
-
-	/* ISP NV21 -> VPSS -> NV12 encoder surfaces. VPSS imports the capture
-	 * and encoder DMA-BUFs; a private reserved-memory attachment would
-	 * prevent those imports. Keep the fabric clocks for its whole session.
-	 */
-	vpss: vpss@a080000 {
-		compatible = "sophgo,sg2002-vpss";
-		reg = <0x0a080000 0x10000>;
-		interrupt-parent = <&plic>;
-		interrupts = <SOC_PERIPHERAL_IRQ(9) IRQ_TYPE_LEVEL_HIGH>;
-		clocks = <&clk CLK_SRC_VIP_SYS_0>,
-			 <&clk CLK_SRC_VIP_SYS_1>,
-			 <&clk CLK_SRC_VIP_SYS_2>,
-			 <&clk CLK_IMG_V_VIP>,
-			 <&clk CLK_SC_TOP_VIP>,
-			 <&clk CLK_SC_V1_VIP>,
-			 <&clk CLK_AXI_VIP>,
-			 <&clk CLK_CFG_REG_VIP>;
-		clock-names = "sys0", "sys1", "sys2", "img_v", "sc_top", "sc_v1",
-			      "axi", "cfg_reg";
-		status = "okay";
-	};
-
 	/* CSI MAC0 -> CSIBDG0 -> DMA6 capture, as on the NanoKVM-PCIe
 	 * carrier, but fed by the GC4653 instead of the LT6911 HDMI bridge. */
 	csi_capture: video-capture@a0c2000 {
@@ -177,7 +129,6 @@
 			      "csi-mac0", "csi0-rx";
 		resets = <&rst RST_CSI_PHY0>, <&rst RST_CSI_PHY0_APB>;
 		reset-names = "csi-phy", "csi-phy-apb";
-		sophgo,ddr-top = <&ddr_top>;
 		memory-region = <&video_pool>;
 		status = "okay";
 
