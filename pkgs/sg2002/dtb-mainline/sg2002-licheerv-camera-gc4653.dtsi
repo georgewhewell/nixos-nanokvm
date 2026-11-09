@@ -82,26 +82,11 @@
 
 	/* GPIOE sits in the RTC power domain and has no soft-reset line
 	 * (RST_GPIO4 does not exist). Vendor DTS: PLIC source 70, which is
-	 * SOC_PERIPHERAL_IRQ(54) after the 16 core-local IDs. */
-	gpio4: gpio@5021000 {
-		compatible = "snps,dw-apb-gpio";
-		reg = <0x05021000 0x1000>;
-		#address-cells = <1>;
-		#size-cells = <0>;
-
-		porte: gpio-controller@0 {
-			compatible = "snps,dw-apb-gpio-port";
-			gpio-controller;
-			#gpio-cells = <2>;
-			ngpios = <32>;
-			reg = <0>;
-			interrupt-controller;
-			#interrupt-cells = <2>;
-			interrupt-parent = <&plic>;
-			interrupts = <SOC_PERIPHERAL_IRQ(54) IRQ_TYPE_LEVEL_HIGH>;
-		};
-	};
-
+	 * SOC_PERIPHERAL_IRQ(54) after the 16 core-local IDs.
+	 * Upstream 7.3.x cv180x.dtsi now describes this controller itself
+	 * (gpio4/porte under /soc, with the same PLIC interrupt, whose
+	 * parent is inherited from the soc node), so only the ddr_top
+	 * syscon is added here — redefining gpio4 duplicates the label. */
 	ddr_top: syscon@800a000 {
 		compatible = "sophgo,sg2002-ddr-top", "syscon";
 		reg = <0x0800a000 0x1000>;
