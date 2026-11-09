@@ -387,6 +387,14 @@ let
     ./sg2002-licheerv-camera-gc4653.dtsi
   ];
 
+  # Camera + WiFi: keep the B-W board's SDIO1/AIC8800 wiring and add the
+  # GC4653 overlay. The camera consumes IIC4/MIPIRX0N/GPIOE pins, so the
+  # overlays coexist (same argument as the picoclaw-lcd-wifi variant).
+  dtbCamWifi = buildDtb "sg2002-licheerv-nano-bw-cam-wifi" [
+    ./sg2002-licheerv-nano-bw.dtsi
+    ./sg2002-licheerv-camera-gc4653.dtsi
+  ];
+
   dtbPcieNoWifi = buildDtb "sg2002-nanokvm-pcie-nowifi" [
     ./sg2002-licheerv-nano-bw.dtsi
     ./sg2002-nanokvm-pcie.dtsi
@@ -470,4 +478,5 @@ in
   pcie-nowifi-c906l-for = dtbPcieNoWifiC906LFor;
   pcie-full-speed = dtbPcieFullSpeed;
   cam = dtbCam;
+  cam-wifi = dtbCamWifi;
 }

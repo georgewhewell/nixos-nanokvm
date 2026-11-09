@@ -624,6 +624,7 @@ in
       final.sg2002-c906l-contract-all-timers;
   sg2002-dtb-mainline-pcie-full-speed = dtbMainline.pcie-full-speed;
   sg2002-dtb-mainline-cam = dtbMainline.cam;
+  sg2002-dtb-mainline-cam-wifi = dtbMainline.cam-wifi;
   sg2002-dtb-vendor = dtbVendor.boot;
   sg2002-dtb-vendor-gadget = dtbVendor.gadget;
 
