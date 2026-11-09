@@ -32,31 +32,4 @@
 #endif
 
 /* BISECT: camera overlay fully stripped - tests initrd/kernel on plain bw base */
-&i2c4 {
-	pinctrl-0 = <&i2c4_cam_cfg>;
-	pinctrl-names = "default";
-	status = "okay";
-
-	gc4653: camera-sensor@29 {
-		compatible = "galaxycore,gc4653";
-		reg = <0x29>;
-		pinctrl-0 = <&cam_mclk1_cfg>;
-		pinctrl-names = "default";
-		clocks = <&clk CLK_CAM1>;
-		clock-names = "xvclk";
-		/* Keep the sensor's clock assignment on its consumer: the shared
-		 * CPUFreq overlay assigns MPLL on the clock-controller node. */
-		assigned-clocks = <&clk CLK_CAM1>;
-		assigned-clock-rates = <24000000>;
-		reset-gpios = <&porte 1 GPIO_ACTIVE_LOW>;
-
-		port {
-			gc4653_out: endpoint {
-				remote-endpoint = <&sg2002_csi_in>;
-				bus-type = <4>; /* CSI-2 D-PHY */
-				clock-lanes = <4>;
-				data-lanes = <3 2>;
-			};
-		};
-	};
-};
+/* BISECT: camera overlay fully stripped - tests initrd/kernel on plain bw base */
