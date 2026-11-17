@@ -24,6 +24,38 @@
   ...
 }: let
   protocol = import ../lib/protocol.nix;
+  # Order fixes the /dev/hidgN numbering the NanoKVM server expects.
+  hidFunctions = [
+    {
+      name = "hid.GS0";
+      # Boot subclass: firmware setup screens and pre-boot PIN prompts
+      # only talk to boot keyboards, and f_hid stalls SET_PROTOCOL
+      # without it.
+      subclass = 1;
+      protocol = 1;
+      reportLength = 8;
+      descriptor = "\\x05\\x01\\x09\\x06\\xa1\\x01\\x05\\x07\\x19\\xe0\\x29\\xe7\\x15\\x00\\x25\\x01\\x75\\x01\\x95\\x08\\x81\\x02\\x95\\x01\\x75\\x08\\x81\\x03\\x95\\x05\\x75\\x01\\x05\\x08\\x19\\x01\\x29\\x05\\x91\\x02\\x95\\x01\\x75\\x03\\x91\\x03\\x95\\x06\\x75\\x08\\x15\\x00\\x25\\xe7\\x05\\x07\\x19\\x00\\x29\\xe7\\x81\\x00\\xc0";
+    }
+    {
+      name = "hid.GS1";
+      subclass = 0;
+      protocol = 2;
+      reportLength = 4;
+      descriptor = "\\x05\\x01\\x09\\x02\\xa1\\x01\\x09\\x01\\xa1\\x00\\x05\\x09\\x19\\x01\\x29\\x03\\x15\\x00\\x25\\x01\\x95\\x03\\x75\\x01\\x81\\x02\\x95\\x01\\x75\\x05\\x81\\x03\\x05\\x01\\x09\\x30\\x09\\x31\\x09\\x38\\x15\\x81\\x25\\x7f\\x75\\x08\\x95\\x03\\x81\\x06\\xc0\\xc0";
+    }
+    {
+      name = "hid.GS2";
+      subclass = 0;
+      protocol = 2;
+      reportLength = 6;
+      descriptor = "\\x05\\x01\\x09\\x02\\xa1\\x01\\x09\\x01\\xa1\\x00\\x05\\x09\\x19\\x01\\x29\\x05\\x15\\x00\\x25\\x01\\x95\\x05\\x75\\x01\\x81\\x02\\x95\\x01\\x75\\x03\\x81\\x01\\x05\\x01\\x09\\x30\\x09\\x31\\x15\\x00\\x26\\xff\\x7f\\x35\\x00\\x46\\xff\\x7f\\x75\\x10\\x95\\x02\\x81\\x02\\x05\\x01\\x09\\x38\\x15\\x81\\x25\\x7f\\x35\\x00\\x45\\x00\\x75\\x08\\x95\\x01\\x81\\x06\\xc0\\xc0";
+    }
+  ];
+  hidNames = map (fn: fn.name) hidFunctions;
+  # dwc2 on the SG2002 has six IN FIFOs. Network (2) + ACM (2) + HID (3)
+  # needs seven, and the host then resets the device in a loop, so HID
+  # replaces the serial function.
+  acmEnable = !gadgetCfg.hid.enable;
   cfg = config.sg2002;
   gadgetCfg = cfg.usbGadget;
   networkEnable = gadgetCfg.network.enable;
@@ -130,8 +162,8 @@
     fi
     ''}
 
-    mkdir -p $G/functions/acm.GS0
-    ${lib.optionalString gadgetCfg.console.enable ''
+    ${lib.optionalString acmEnable "mkdir -p $G/functions/acm.GS0"}
+    ${lib.optionalString (acmEnable && gadgetCfg.console.enable) ''
       # Route the kernel console to this ACM port when the kernel
       # exposes the configfs knob. Requires `console=ttyGS0,...`.
       if [ -e "$G/functions/acm.GS0/console" ]; then
@@ -141,9 +173,9 @@
 
     mkdir -p $G/configs/c.1/strings/0x409
     if [ "$want_network" = 1 ]; then
-      echo "${lib.toUpper transport} + ACM" > "$G/configs/c.1/strings/0x409/configuration"
+      echo "${lib.toUpper transport} + ${if acmEnable then "ACM" else "HID"}" > "$G/configs/c.1/strings/0x409/configuration"
     else
-      echo "ACM" > "$G/configs/c.1/strings/0x409/configuration"
+      echo "${if acmEnable then "ACM" else "HID"}" > "$G/configs/c.1/strings/0x409/configuration"
     fi
     echo 250 > "$G/configs/c.1/MaxPower"
 
@@ -152,7 +184,21 @@
       [ -e "$G/configs/c.1/${netFn}" ] || ln -s "$G/functions/${netFn}" "$G/configs/c.1/"
     fi
     ''}
+    ${lib.optionalString acmEnable ''
     [ -e "$G/configs/c.1/acm.GS0" ] || ln -s $G/functions/acm.GS0 $G/configs/c.1/
+    ''}
+
+    ${lib.optionalString gadgetCfg.hid.enable (lib.concatMapStrings (fn: ''
+    # f_hid rejects attribute writes once the function is linked.
+    if [ ! -e "$G/configs/c.1/${fn.name}" ]; then
+      mkdir -p "$G/functions/${fn.name}"
+      echo ${toString fn.subclass} > "$G/functions/${fn.name}/subclass"
+      echo ${toString fn.protocol} > "$G/functions/${fn.name}/protocol"
+      echo ${toString fn.reportLength} > "$G/functions/${fn.name}/report_length"
+      printf '${fn.descriptor}' > "$G/functions/${fn.name}/report_desc"
+      ln -s "$G/functions/${fn.name}" "$G/configs/c.1/"
+    fi
+    '') hidFunctions)}
 
     # Bind to the first available UDC (SG2002 has exactly one).
     # Poll for it — on the vendor kernel UDC registration is async
@@ -175,14 +221,14 @@
     G=/sys/kernel/config/usb_gadget/sg2002
     [ -d $G ] || exit 0
     echo "" > $G/UDC || true
-    for fn in ecm.usb0 rndis.usb0 ncm.usb0 mass_storage.disk0; do
+    for fn in ecm.usb0 rndis.usb0 ncm.usb0 mass_storage.disk0 ${toString hidNames}; do
       rm -f "$G/configs/c.1/$fn"
     done
     rm -f $G/configs/c.1/acm.GS0
     rmdir $G/configs/c.1/strings/0x409 || true
     rmdir $G/configs/c.1               || true
-    for fn in ecm.usb0 rndis.usb0 ncm.usb0 mass_storage.disk0; do
-      rmdir "$G/functions/$fn" || true
+    for fn in ecm.usb0 rndis.usb0 ncm.usb0 mass_storage.disk0 ${toString hidNames}; do
+      [ ! -d "$G/functions/$fn" ] || rmdir "$G/functions/$fn" || true
     done
     ${lib.optionalString (!gadgetCfg.console.enable) ''
     rmdir $G/functions/acm.GS0         || true
@@ -335,6 +381,10 @@ in {
   config = lib.mkMerge [
     {
       assertions = [
+        {
+          assertion = !(gadgetCfg.hid.enable && gadgetCfg.console.enable);
+          message = "sg2002.usbGadget.hid.enable drops the ACM function; set sg2002.usbGadget.console.enable = false.";
+        }
         {
           assertion = !preserveInitrd || (
             gadgetCfg.stage2.enable
